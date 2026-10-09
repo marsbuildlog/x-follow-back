@@ -64,7 +64,6 @@
   async function loadSettings() {
     const { rf_settings: s } = await chrome.storage.local.get('rf_settings');
     const v = { ...RF.DEFAULTS, ...(s || {}) };
-    $('s-dailyLimit').value = v.dailyLimit;
     $('s-intervalMin').value = v.intervalMin;
     $('s-intervalMax').value = v.intervalMax;
     $('s-stallMin').value = v.stallMin;
@@ -74,7 +73,6 @@
   async function saveSettings() {
     await chrome.storage.local.set({
       rf_settings: {
-        dailyLimit: +$('s-dailyLimit').value || RF.DEFAULTS.dailyLimit,
         intervalMin: +$('s-intervalMin').value || RF.DEFAULTS.intervalMin,
         intervalMax: +$('s-intervalMax').value || RF.DEFAULTS.intervalMax,
         stallMin: +$('s-stallMin').value || RF.DEFAULTS.stallMin,

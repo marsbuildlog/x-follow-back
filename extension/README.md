@@ -1,6 +1,6 @@
 # Refollow — Twitter/X 自动回关认证粉丝
 
-浏览器插件(Chrome / Edge, MV3)。自动回关蓝V认证粉丝, 带限流退避、每日上限与状态展示。
+浏览器插件(Chrome / Edge, MV3)。自动回关蓝V认证粉丝, 带限流退避与状态展示。
 
 需求与决策见 `docs/biz-plan.md`。
 
@@ -59,7 +59,7 @@ options 控制台: 队列表(含失败原始出错信息)/设置/日志/PoC面�
 
 | key | 内容 |
 |-----|------|
-| `rf_settings` | 每日上限/间隔/退避等设置 |
+| `rf_settings` | 间隔/退避等设置 |
 | `rf_daily` | `{date, followed}` 今日已关注数 |
 | `rf_task` | 任务状态机 + 回关队列(每人状态与出错信息) |
 | `rf_lock` | 多标签页领导权锁 |

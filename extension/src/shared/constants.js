@@ -10,7 +10,6 @@ const RF = {
     refreshRequest: 'rf_refresh_request',
   },
   DEFAULTS: {
-    dailyLimit: 400,      // 每日关注上限
     intervalMin: 15,      // 关注间隔随机区间下限(秒)
     intervalMax: 30,      // 关注间隔随机区间上限(秒)
     stallMin: 30,         // 持续失败多少分钟判定为限流并暂停

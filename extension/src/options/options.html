@@ -63,7 +63,6 @@
 
   <h2>设置</h2>
   <section class="row">
-    <label>每日关注上限 <input type="number" id="s-dailyLimit" /></label>
     <label>关注间隔下限(秒) <input type="number" id="s-intervalMin" /></label>
     <label>关注间隔上限(秒) <input type="number" id="s-intervalMax" /></label>
     <label>连续失败暂停(分钟) <input type="number" id="s-stallMin" /></label>
@@ -73,7 +72,7 @@
   </section>
   <div class="hint">
     连续失败暂停：非 429 的关注失败连续持续超过该时长 → 任务自动暂停（保护账号）。·
-    暂停后自动恢复间隔：暂停后每隔该时长自动尝试恢复（每日上限触发的暂停到次日 0 点才恢复；手动恢复随时可用）。·
+    暂停后自动恢复间隔：暂停后每隔该时长自动尝试恢复（触达 X 侧关注上限(161)的暂停到次日 0 点才恢复；手动恢复随时可用）。·
     429退避等待：关注请求命中 429 限流后，等待该时长再发下一个关注请求（被 429 的人标为失败不自动重试，可用「更新列表」重新入队）。·
     修改后点「保存设置」，下一个关注请求即生效。
   </div>

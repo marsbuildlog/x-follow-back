@@ -368,11 +368,6 @@
         if (await processRefreshRequest(true)) task = await store.get(K.task, null);
         if (!task || task.state !== 'running') break;
         const settings = await getSettings();
-        const daily = await getDaily();
-        if (daily.followed >= settings.dailyLimit) {
-          await pauseTask('daily-limit', nextMidnight());
-          break;
-        }
         const item = task.queue.find((i) => i.status === 'pending');
         if (!item) {
           task.state = 'done';
@@ -403,7 +398,7 @@
           const d = await getDaily();
           d.followed++;
           await store.set(K.daily, d);
-          await log(`已关注 ${atName(current)}, 今日 ${d.followed}/${settings.dailyLimit}`);
+          await log(`已关注 ${atName(current)}, 今日 ${d.followed}`);
         } else {
           current.status = 'failed';
           current.error = r.errorText;
@@ -507,12 +502,10 @@
   let bar = null;
   let cachedTask = null;
   let cachedDaily = { followed: 0 };
-  let cachedSettings = RF.DEFAULTS;
 
   async function refreshCache() {
     cachedTask = await store.get(K.task, null);
     cachedDaily = await getDaily();
-    cachedSettings = await getSettings();
   }
   chrome.storage.onChanged.addListener(refreshCache);
   refreshCache();
@@ -538,14 +531,14 @@
       paused: `已暂停(${t.pauseReason || '?'})`, done: '已完成',
     }[t.state] || t.state;
     // 内容没变就跳过重渲染, 避免打断按钮点击
-    const sig = [t.state, t.pauseReason, t.nextAutoResumeAt, pending, done, failed, cachedDaily.followed, cachedSettings.dailyLimit, t.lastError].join('|');
+    const sig = [t.state, t.pauseReason, t.nextAutoResumeAt, pending, done, failed, cachedDaily.followed, t.lastError].join('|');
     if (sig === bar.dataset.sig) return;
     bar.dataset.sig = sig;
     bar.innerHTML = `
       <strong>Refollow</strong>
       <span>状态: ${stateText}${t.state === 'paused' && t.nextAutoResumeAt ? ', ' + Math.max(0, Math.round((t.nextAutoResumeAt - Date.now()) / 60000)) + '分钟后自动恢复' : ''}</span>
       <span>进度: 待回关 ${pending} / 已回关 ${done} / 失败 ${failed}</span>
-      <span>今日: ${cachedDaily.followed}/${cachedSettings.dailyLimit}</span>
+      <span>今日: ${cachedDaily.followed}</span>
       <span style="margin-left:auto;display:flex;gap:8px">
         <button data-act="start">开始回关</button>
         <button data-act="refresh" title="重新拉取认证粉丝, 新粉丝自动加入队列">更新列表</button>

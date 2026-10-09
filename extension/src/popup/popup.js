@@ -1,13 +1,12 @@
 (() => {
   'use strict';
   const render = async () => {
-    const { rf_daily: d, rf_task: t, rf_settings: s } = await chrome.storage.local.get(['rf_daily', 'rf_task', 'rf_settings']);
-    const limit = (s && s.dailyLimit) || 400;
+    const { rf_daily: d, rf_task: t } = await chrome.storage.local.get(['rf_daily', 'rf_task']);
     const today = new Date();
     const p = (n) => String(n).padStart(2, '0');
     const ds = `${today.getFullYear()}-${p(today.getMonth() + 1)}-${p(today.getDate())}`;
     const daily = d && d.date === ds ? d : { followed: 0 };
-    document.getElementById('today').textContent = `${daily.followed}/${limit}`;
+    document.getElementById('today').textContent = `${daily.followed}`;
     document.getElementById('state').textContent = t ? `任务: ${t.state}${t.pauseReason ? '(' + t.pauseReason + ')' : ''}` : '任务: 未启动';
   };
   document.getElementById('open').onclick = () => chrome.runtime.openOptionsPage();
