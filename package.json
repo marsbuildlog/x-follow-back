@@ -4,6 +4,7 @@
   "private": true,
   "description": "Twitter/X 自动回关认证粉丝插件",
   "scripts": {
-    "test": "node --test \"extension/test/*.test.js\""
+    "test": "node --test \"extension/test/*.test.js\"",
+    "build": "node scripts/build.js"
   }
 }

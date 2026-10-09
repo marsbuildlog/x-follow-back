@@ -21,6 +21,14 @@
 
 > ⚠️ 任务运行在打开的 x.com 标签页里,**使用期间请保持至少一个 x.com 标签页开启**;关闭后任务暂停,重新打开会自动接管继续。
 
+## 📦 打包发布
+
+```bash
+npm run build
+```
+
+自动读取 `extension/manifest.json` 的版本号,将插件打包为 `releases/refollow-v{version}.zip`(排除 `test/`),可直接发给他人加载。
+
 ## 🔧 工作原理
 
 ```
