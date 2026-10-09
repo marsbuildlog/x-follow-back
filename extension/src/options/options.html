@@ -45,9 +45,9 @@
 
   <h2>任务</h2>
   <section><span id="task-state" class="hint"></span></section>
+  <!-- 启动/更新列表只在认证粉丝页的悬浮控件上(任务跑在页面里, 操作跟着页面走);
+       控制台只留跨页面可用的遥控: 暂停/恢复(账号导航走时控件不在, 任务仍在跑) + 重置(仅此处有) -->
   <section class="row">
-    <button id="btn-start">启动任务</button>
-    <button id="btn-refresh" class="ghost" title="重新拉取认证粉丝, 新粉丝自动加入队列, 运行中也可用, 并重置自动拉取计时">更新列表</button>
     <button id="btn-pause" class="ghost">暂停</button>
     <button id="btn-resume" class="ghost">恢复</button>
     <button id="btn-reset" class="danger">重置任务</button>

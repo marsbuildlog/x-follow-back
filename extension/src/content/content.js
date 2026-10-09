@@ -614,10 +614,8 @@
             sendResponse(t);
             break;
           }
-          case 'start-task': sendResponse(await startTask(msg.screenName)); break;
           case 'pause-task': await pauseTask(h, 'manual'); sendResponse({ ok: true }); break;
           case 'resume-task': sendResponse(await resumeTask(h)); break;
-          case 'refresh-list': sendResponse(await requestRefresh()); break;
           case 'reset-task': await store.set(taskKey(h), null); sendResponse({ ok: true }); break;
           case 'test-follow-one': sendResponse(await testFollowOne(h)); break;
           default: sendResponse({ ok: false, message: 'unknown cmd' });

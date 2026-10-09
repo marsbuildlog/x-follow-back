@@ -174,8 +174,8 @@
   }
 
   // ---------- 按钮 ----------
-  $('btn-start').onclick = async () => { showOp('启动中…'); const r = await send('start-task'); showOp(r.message || String(r.ok)); render(); };
-  $('btn-refresh').onclick = async () => { const r = await send('refresh-list'); showOp(r.message || String(r.ok)); };
+  // 启动/更新列表在认证粉丝页悬浮控件上(依赖页面路径, 控制台发多半报错);
+  // 这里只留跨页面可用的遥控: 暂停/恢复(按活跃账号, 不依赖当前路径) + 重置
   $('btn-pause').onclick = async () => { await send('pause-task'); showOp('已请求暂停'); render(); };
   $('btn-resume').onclick = async () => { await send('resume-task'); showOp('已请求恢复'); render(); };
   $('btn-reset').onclick = async () => {
