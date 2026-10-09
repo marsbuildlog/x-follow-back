@@ -42,7 +42,9 @@ x.com 标签页
 │     收到指令时用捕获的请求头模板重放:
 │       BlueVerifiedFollowers (GraphQL, 拉认证粉丝)
 │       /i/api/1.1/friendships/create.json (v1.1 REST, 回关, 仅替换 user_id)
-└── content.js     (隔离世界)
+└── content.js     (隔离世界, 入口唯一文件)
+      启动时 await import() 显式加载 shared/constants.js 与 shared/logic.js 并校验挂载
+      (⚠ 不用 manifest 多文件列表保证顺序: Chrome 的多文件注入顺序不可靠, 出过 logic.js 未执行的确定性 bug)
       任务执行器: 拉粉丝→过滤已关注→逐个关注(随机间隔30~90s)
       失败处理: 429/88→退避15min; 161→当日停止; 连续失败30min→暂停
       暂停恢复: 手动恢复; 未恢复则每小时自动尝试
