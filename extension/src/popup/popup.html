@@ -3,21 +3,28 @@
 <head>
   <meta charset="UTF-8" />
   <style>
-    body { width: 220px; font: 13px/1.6 -apple-system, system-ui, sans-serif; padding: 12px; color: #0f1419; }
-    #today { color: #1d9bf0; font-weight: 600; }
-    button { width: 100%; padding: 6px; border: 1px solid #1d9bf0; background: #1d9bf0; color: #fff; border-radius: 16px; cursor: pointer; margin-bottom: 6px; }
-    button.ghost { background: #fff; color: #1d9bf0; }
-    .hint { color: #536471; font-size: 11px; }
+    body { width: 240px; font: 13px/1.6 -apple-system, system-ui, sans-serif; padding: 16px; color: #0f1419; margin: 0; }
+    .head { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #536471; flex: none; }
+    #state { color: #536471; font-size: 12px; margin: 2px 0 12px; }
+    .nums { display: flex; align-items: baseline; gap: 6px; }
+    #pending { font-size: 28px; font-weight: 700; color: #1d9bf0; line-height: 1.1; }
+    .lbl { color: #536471; }
+    #total { color: #536471; font-size: 12px; margin-left: auto; }
+    #today { color: #536471; font-size: 12px; margin-bottom: 14px; }
+    button { width: 100%; padding: 8px; border: none; background: #1d9bf0; color: #fff; border-radius: 9999px; cursor: pointer; font-weight: 700; font-size: 13px; margin-bottom: 8px; }
+    button:hover { background: #1a8cd8; }
+    button.ghost { background: #fff; color: #1d9bf0; border: 1px solid #1d9bf0; font-weight: 400; }
+    button.ghost:hover { background: #e8f5fd; }
   </style>
 </head>
 <body>
-  <div>今日已回关: <span id="today">…</span></div>
-  <div id="state" class="hint"></div>
-  <p>
-    <button id="open">打开控制台</button>
-    <button id="reload" class="ghost" style="display:none">↻ 重载插件(并刷新x.com页面)</button>
-    <span id="dev-hint" class="hint" style="display:none">开发模式: 本地目录导入, 上架后此按钮自动隐藏</span>
-  </p>
+  <div class="head"><span class="dot" id="dot"></span><span id="handle">—</span></div>
+  <div id="state">读取中…</div>
+  <div class="nums"><span id="pending">–</span><span class="lbl">待回关</span><span id="total"></span></div>
+  <div id="today"></div>
+  <button id="open">打开控制台</button>
+  <button id="reload" class="ghost" style="display:none">↻ 重载插件(并刷新 x.com)</button>
   <script src="popup.js"></script>
 </body>
 </html>

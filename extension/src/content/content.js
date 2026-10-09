@@ -36,7 +36,8 @@
     halted = true;
     for (const id of intervals) clearInterval(id);
     try {
-      document.getElementById('refollow-bar')?.remove();
+      document.getElementById('refollow-widget')?.remove(); // 新版悬浮控件
+      document.getElementById('refollow-bar')?.remove();     // 旧版顶部横条(升级兼容清理)
       document.getElementById('refollow-bar-style')?.remove();
     } catch {}
   }
@@ -325,6 +326,26 @@
   // 任务状态机 + 回关循环(消费者)
   // ============================================================
   let runningHandle = null; // 本标签页正在跑回关的账号(同一时间只跑一个)
+
+  // 自动暂停时发系统通知(带系统声音), 避免用户以为还在正常跑
+  const PAUSE_ALERTS = {
+    'template-expired': '回关模板已过期: 请在认证粉丝列表点一次「回关」, 然后点「恢复」',
+    'daily-limit': '今日关注已达 X 上限, 明天 00:05 自动恢复',
+    'stalled': '连续失败超过阈值, 稍后自动恢复',
+    'error': '连续请求异常, 稍后自动恢复',
+  };
+  function notifyPause(reason) {
+    // chrome.notifications 仅扩展页面可用, 经 background SW 代理; 同 tag 覆盖旧通知防堆积
+    try {
+      const p = chrome.runtime.sendMessage({
+        cmd: 'notify',
+        tag: 'pause-' + reason,
+        title: 'Refollow 已暂停',
+        message: PAUSE_ALERTS[reason] || reason,
+      });
+      if (p && p.catch) p.catch(() => {});
+    } catch {} // 孤儿/通知失败不影响主流程
+  }
   async function pauseTask(handle, reason, resumeAt) {
     const t = await getTask(handle);
     t.state = 'paused';
@@ -332,6 +353,7 @@
     t.nextAutoResumeAt = resumeAt || null;
     await saveTask(handle, t);
     await log(`任务暂停(${reason})`);
+    if (reason !== 'manual') notifyPause(reason);
   }
   async function resumeTask(handle) {
     const t = await getTask(handle);
@@ -385,6 +407,9 @@
     try {
       let task = await store.get(taskKey(handle), null);
       if (!task || task.state !== 'running') return;
+      let rateRetryUserId = null; // B: 429 重试同一人计数
+      let rateRetryCount = 0;
+      let errorStreak = 0;        // C: 请求层连续异常计数
 
       while (true) {
         await refreshLock();
@@ -410,10 +435,25 @@
         const current = findPendingItem(task.queue, item.userId);
         if (!current) continue; // 已被其他流程处理, 换下一个
 
-        const res = await followUser(current.userId);
+        let res;
+        try {
+          res = await followUser(current.userId);
+        } catch (e) {
+          // C: 请求层异常(模板未捕获/桥超时等) → 记日志, 连续 2 次才暂停, 避免静默死亡循环
+          errorStreak++;
+          await log(`关注请求异常(${errorStreak}/2) ${atName(current)}: ${e}`);
+          if (errorStreak >= 2) {
+            await pauseTask(handle, 'error', Date.now() + settings.autoResumeMin * 60_000);
+            break;
+          }
+          await sleep(5_000);
+          continue; // 未标记失败, 重试同一人
+        }
         const r = interpret(res);
+        errorStreak = 0;
 
         if (r.ok) {
+          rateRetryUserId = null;
           current.status = 'done';
           current.doneAt = Date.now();
           current.error = null;
@@ -429,32 +469,47 @@
             await log(`本窗口次数已用完(remaining=0), ${Math.round(pw / 1000)}秒后窗口重置自动继续`);
             if (!(await sleepInterruptible(pw, handle))) break;
           }
+        } else if (r.rateLimited) {
+          // B: 429/88 是环境问题不是这个人的问题 → 不标失败不进 stall,
+          // 等窗口重置后重试同一人; 连续超过 3 次才标 failed 跳过
+          if (rateRetryUserId !== item.userId) { rateRetryUserId = item.userId; rateRetryCount = 1; }
+          else rateRetryCount++;
+          const backoff = rateLimitBackoffMs(r, Date.now(), settings.rateLimitBackoffMin * 60_000);
+          if (rateRetryCount > 3) {
+            current.status = 'failed';
+            current.error = `连续限流 ${rateRetryCount} 次: ${r.errorText}`;
+            task.lastError = `${atName(current)}: ${current.error}`;
+            await saveTask(handle, task);
+            await log(`关注失败 ${atName(current)}: 连续限流, 暂时跳过(恢复时重新入队)`);
+            rateRetryUserId = null;
+          } else {
+            const resetTxt = r.rateReset ? ', 窗口 ' + new Date(r.rateReset * 1000).toLocaleTimeString() + ' 重置' : '';
+            await log(`限流(${rateRetryCount}/3)${resetTxt}, ${Math.round(backoff / 1000)}秒后重试同一人 ${atName(current)}`);
+            if (!(await sleepInterruptible(backoff, handle))) break;
+          }
         } else {
+          // 其他失败: 标 failed, 记原始错误
+          rateRetryUserId = null;
           current.status = 'failed';
           current.error = r.errorText;
           task.lastError = `${atName(current)}: ${r.errorText}`;
-          task.consecutiveFailures.push(Date.now());
-          const stall = evaluateStall(task.consecutiveFailures, Date.now(), settings.stallMin * 60_000, settings.stallMin * 60_000);
-          task.consecutiveFailures = stall.kept;
-          await saveTask(handle, task); // 先落库
-          await log(`关注失败 ${atName(current)}: ${r.errorText}`);
-
-          if (r.followLimited) {
-            // 161: 达到关注上限 → 视同当日额度用完
-            await pauseTask(handle, 'daily-limit', nextMidnight());
-          } else if (r.rateLimited) {
-            // 429/88: 按响应头 x-rate-limit-reset 精确等到窗口重置; 无头时退回固定退避; 不直接算 stall
-            const backoff = rateLimitBackoffMs(r, Date.now(), settings.rateLimitBackoffMin * 60_000);
-            if (backoff <= 0) {
-              await log('限流但窗口已重置, 立即重试');
-            } else if (r.rateReset) {
-              await log(`限流, 窗口 ${new Date(r.rateReset * 1000).toLocaleTimeString()} 重置, ${Math.round(backoff / 1000)}秒后自动继续`);
-            } else {
-              await log(`限流(响应头无 reset), 退避 ${settings.rateLimitBackoffMin} 分钟`);
+          if (res.status === 403) {
+            // A: 大概率回关模板过期 → 立即暂停 + 系统通知, 不空转烧请求
+            await saveTask(handle, task);
+            await log(`模板过期(403) ${atName(current)}: 请在认证粉丝列表点一次「回关」刷新模板, 然后手动恢复`);
+            await pauseTask(handle, 'template-expired');
+          } else {
+            task.consecutiveFailures.push(Date.now());
+            const stall = evaluateStall(task.consecutiveFailures, Date.now(), settings.stallMin * 60_000, settings.stallMin * 60_000);
+            task.consecutiveFailures = stall.kept;
+            await saveTask(handle, task); // 先落库
+            await log(`关注失败 ${atName(current)}: ${r.errorText}`);
+            if (r.followLimited) {
+              // 161: 达到关注上限 → 视同当日额度用完
+              await pauseTask(handle, 'daily-limit', nextMidnight());
+            } else if (stall.shouldPause) {
+              await pauseTask(handle, 'stalled', Date.now() + settings.autoResumeMin * 60_000);
             }
-            if (!(await sleepInterruptible(backoff, handle))) break;
-          } else if (stall.shouldPause) {
-            await pauseTask(handle, 'stalled', Date.now() + settings.autoResumeMin * 60_000);
           }
         }
         task = await store.get(taskKey(handle), null);
@@ -536,7 +591,17 @@
         switch (msg && msg.cmd) {
           case 'ping': sendResponse({ ok: true }); break;
           case 'get-captured': sendResponse(await callPage('list-captured', {})); break;
-          case 'get-task': sendResponse(h ? { ...(await getTask(h)), daily: await getDaily(h) } : null); break;
+          case 'get-task': {
+            const t = h ? { ...(await getTask(h)), daily: await getDaily(h) } : null;
+            if (t) {
+              try {
+                const cap = await callPage('list-captured', {});
+                t.templateCaptured = (cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API);
+              } catch { t.templateCaptured = null; }
+            }
+            sendResponse(t);
+            break;
+          }
           case 'start-task': sendResponse(await startTask(msg.screenName)); break;
           case 'pause-task': await pauseTask(h, 'manual'); sendResponse({ ok: true }); break;
           case 'resume-task': sendResponse(await resumeTask(h)); break;
@@ -552,114 +617,165 @@
     return true; // async response
   });
 
-  // ---------- x.com 页面状态条 ----------
-  let bar = null;
+  // ---------- x.com 页面悬浮控件(右上角 pill, 点击展开面板) ----------
+  // 不占页面流、不遮挡内容; pill 常显核心数字, 需要用户操作时变红脉动
+  let widget = null;
+  let panelOpen = false;
   let cachedTask = null;
-  let cachedDaily = { followed: 0 };
+  let cachedFetchProgress = null;
+
+  const WIDGET_CSS = `
+    #refollow-widget { position: fixed; top: 60px; z-index: 99999; display: flex; flex-direction: column; align-items: flex-end;
+      pointer-events: none; font: 13px/1.5 -apple-system, system-ui, sans-serif; }
+    #refollow-widget > * { pointer-events: auto; }
+    #refollow-pill { display: flex; align-items: center; gap: 8px; padding: 8px 18px; border-radius: 9999px;
+      background: #1d9bf0; color: #fff; border: 1px solid #1a8cd8; box-shadow: 0 2px 12px rgba(0,0,0,.25);
+      cursor: pointer; user-select: none; white-space: nowrap; font-weight: 700; }
+    #refollow-pill:hover { background: #1a8cd8; }
+    #refollow-pill .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; box-shadow: 0 0 0 2px rgba(255,255,255,.85); }
+    #refollow-pill.alert { background: #dc2626; border-color: #dc2626; animation: refollowPulse 1.2s ease-in-out infinite; }
+    @keyframes refollowPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+    #refollow-panel { width: 340px; margin-top: 8px; background: #fff; color: #0f1419; border: 1px solid #e1e8ed;
+      border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.22); padding: 14px 16px; }
+    #refollow-panel .rf-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+    #refollow-panel .rf-head span { color: #536471; font-size: 12px; }
+    #refollow-panel .rf-status { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    #refollow-panel .rf-status .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+    #refollow-panel .rf-nums { margin-bottom: 8px; }
+    #refollow-panel .rf-nums b { font-size: 16px; }
+    #refollow-panel .rf-alert { background: #fdecec; color: #b02a37; border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
+    #refollow-panel .rf-err { color: #b02a37; font-size: 12px; margin-bottom: 8px; word-break: break-all; }
+    #refollow-panel .rf-btns { display: flex; gap: 8px; margin-bottom: 8px; }
+    #refollow-panel .rf-keep { color: #b45309; font-size: 12px; background: #fff7ed; border-radius: 8px; padding: 6px 10px; }
+    #refollow-widget .rf-btn { padding: 7px 20px; border-radius: 9999px; font-weight: 700; font-size: 13px; cursor: pointer; border: none; }
+    #refollow-widget .rf-btn.primary { background: #1d9bf0; color: #fff; }
+    #refollow-widget .rf-btn.primary:hover { background: #1a8cd8; }
+    #refollow-widget .rf-btn.warn { background: #dc2626; color: #fff; }
+    #refollow-widget .rf-btn.warn:hover { background: #b91c1c; }
+    #refollow-widget .rf-btn.ghost { background: #fff; color: #1d9bf0; border: 1px solid #1d9bf0; font-weight: 400; }
+    #refollow-widget .rf-btn.ghost:hover { background: #e8f5fd; }
+  `;
+  const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+  // 状态 → 文案/颜色; alert=true 表示需要用户立即操作(pill 红色脉动)
+  const STATE_STYLE = {
+    idle: { text: '未启动', color: '#536471' },
+    running: { text: '运行中', color: '#1d9bf0' },
+    fetching: { text: '拉取中', color: '#7c3aed' },
+    'paused:manual': { text: '已暂停·手动', color: '#d97706' },
+    'paused:stalled': { text: '已暂停·连续失败', color: '#d97706' },
+    'paused:daily-limit': { text: '今日已达上限', color: '#d97706' },
+    'paused:template-expired': { text: '模板过期', color: '#dc2626', alert: true },
+    'paused:error': { text: '已暂停·连续异常', color: '#dc2626' },
+    done: { text: '等待新粉', color: '#16a34a' },
+  };
+  function currentState(t) {
+    if (!t) return STATE_STYLE.idle;
+    if (t.state === 'running') return cachedFetchProgress ? STATE_STYLE.fetching : STATE_STYLE.running;
+    if (t.state === 'paused') return STATE_STYLE['paused:' + t.pauseReason] || { text: '已暂停', color: '#d97706' };
+    if (t.state === 'done') return STATE_STYLE.done;
+    return STATE_STYLE.idle;
+  }
 
   async function refreshCache() {
     const h = curHandle() || (await store.get(K.active, null));
     cachedTask = h ? await getTask(h) : null;
-    cachedDaily = h ? await getDaily(h) : { followed: 0 };
+    cachedFetchProgress = await store.get(K.fetchProgress, null);
   }
   chrome.storage.onChanged.addListener(refreshCache);
   refreshCache();
 
-  function barStyles() {
-    return [
-      'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:99999',
-      'display:flex', 'align-items:center', 'gap:12px', 'flex-wrap:wrap',
-      'padding:6px 16px', 'background:#1d9bf0', 'color:#fff',
-      'font:13px/1.4 -apple-system,system-ui,sans-serif',
-      'box-shadow:0 1px 4px rgba(0,0,0,.3)',
-    ].join(';');
-  }
-  function renderBar() {
-    if (!bar) return;
+  function renderWidget() {
+    if (!widget) return;
     const t = cachedTask || { state: 'idle' };
     const q = t.queue || [];
     const total = q.length;
     const pending = q.filter((i) => i.status === 'pending').length;
-    const stateText = {
-      idle: '未启动', running: '运行中',
-      paused: `已暂停(${t.pauseReason || '?'})`, done: '等待新粉',
-    }[t.state] || t.state;
-    // 内容没变就跳过重渲染, 避免打断按钮点击
-    const sig = [t.state, t.pauseReason, t.nextAutoResumeAt, total, pending, cachedDaily.followed, t.lastError].join('|');
-    if (sig === bar.dataset.sig) return;
-    bar.dataset.sig = sig;
-    bar.innerHTML = `
-      <strong>Refollow</strong>
-      <span>状态: ${stateText}${t.state === 'paused' && t.nextAutoResumeAt ? ', ' + Math.max(0, Math.round((t.nextAutoResumeAt - Date.now()) / 60000)) + '分钟后自动恢复' : ''}</span>
-      <span>总数: ${total} · 待回关: ${pending}</span>
-      <span>今日已回关: ${cachedDaily.followed}</span>
-      <span style="margin-left:auto;display:flex;gap:8px">
-        <button data-act="start">开始回关</button>
-        <button data-act="refresh" title="重新拉取认证粉丝, 新粉丝自动加入队列, 并重置自动拉取计时">更新列表</button>
-        <button data-act="pause">暂停</button>
-        <button data-act="resume">恢复</button>
-        <button data-act="hide" title="收起">×</button>
-      </span>
-      ${t.lastError ? `<div style="flex-basis:100%;font-size:12px;opacity:.9">最近错误: ${String(t.lastError).slice(0, 200)}</div>` : ''}
+    const st = currentState(t);
+    const sig = [t.state, t.pauseReason, t.nextAutoResumeAt, total, pending, st.text, panelOpen,
+      cachedFetchProgress ? cachedFetchProgress.page : 0, t.lastError, t.screenName].join('|');
+    if (sig === widget.dataset.sig) return; // 内容没变跳过重渲染, 避免打断点击
+    widget.dataset.sig = sig;
+
+    const pill = widget.querySelector('#refollow-pill');
+    if (st.alert) {
+      pill.classList.add('alert');
+      pill.textContent = `⚠ ${st.text} · 点击处理`;
+    } else {
+      pill.classList.remove('alert');
+      pill.innerHTML = `<span class="dot" style="background:${st.color}"></span>待回关 ${pending}`;
+    }
+
+    const panel = widget.querySelector('#refollow-panel');
+    const pauseHint = t.state === 'paused' && t.nextAutoResumeAt
+      ? ' · ' + Math.max(0, Math.round((t.nextAutoResumeAt - Date.now()) / 60000)) + '分钟后自动恢复' : '';
+    const fetchInfo = cachedFetchProgress ? ` · 第${cachedFetchProgress.page}页/累计${cachedFetchProgress.users}人` : '';
+    const actionBtn = t.state === 'running'
+      ? `<button class="rf-btn primary" data-act="pause">暂停</button>`
+      : t.state === 'paused'
+        ? `<button class="rf-btn ${st.alert ? 'warn' : 'primary'}" data-act="resume">恢复</button>`
+        : `<button class="rf-btn primary" data-act="start">开始回关</button>`;
+    panel.innerHTML = `
+      <div class="rf-head"><strong>Refollow</strong><span>@${escHtml(t.screenName) || '—'}</span></div>
+      <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${fetchInfo}</div>
+      <div class="rf-nums">总数 <b>${total}</b> · 待回关 <b>${pending}</b></div>
+      ${st.alert ? `<div class="rf-alert">回关模板已过期——请在本列表点一次 X 的「回关」按钮, 再点「恢复」</div>` : ''}
+      ${t.lastError ? `<div class="rf-err">最近错误: ${escHtml(t.lastError).slice(0, 160)}</div>` : ''}
+      <div class="rf-btns">${actionBtn}<button class="rf-btn ghost" data-act="refresh">更新列表</button></div>
+      <div class="rf-keep">⏳ 任务在此页面内运行, 请保持标签页开启——关闭后会暂停, 重新打开会自动继续</div>
     `;
   }
-  function ensureBarStyles() {
-    const style = document.getElementById('refollow-bar-style');
-    if (style) return;
-    const el = document.createElement('style');
-    el.id = 'refollow-bar-style';
-    el.textContent = `
-      #refollow-bar button {
-        padding: 4px 16px;
-        border: none;
-        border-radius: 9999px;
-        background: #ffffff;
-        color: #1d9bf0;
-        font-size: 13px;
-        font-weight: 700;
-        cursor: pointer;
-      }
-      #refollow-bar button:hover { background: #e8f5fd; }
-      #refollow-bar button[data-act="hide"] {
-        background: rgba(255,255,255,.25);
-        color: #ffffff;
-        padding: 4px 10px;
-        font-weight: 400;
-      }
-      #refollow-bar button[data-act="hide"]:hover { background: rgba(255,255,255,.4); }
-      #refollow-bar button:disabled { opacity: .5; cursor: not-allowed; }
-    `;
-    document.documentElement.appendChild(el);
+
+  // 定位到认证关注者页顶部姓名行右侧(主列右缘), 随窗口/列位置校准
+  function positionWidget() {
+    if (!widget) return;
+    const col = document.querySelector('[data-testid="primaryColumn"]');
+    if (col) {
+      const r = col.getBoundingClientRect();
+      widget.style.left = Math.round(r.left) + 'px';
+      widget.style.width = Math.round(r.width) + 'px';
+      widget.style.right = 'auto';
+    } else {
+      widget.style.left = 'auto';
+      widget.style.width = 'auto';
+      widget.style.right = '16px';
+    }
   }
+
   function ensureBar() {
     const onVerifiedFollowers = /^\/[^/]+\/verified_followers/.test(location.pathname);
     if (!onVerifiedFollowers) {
-      if (bar) { bar.remove(); bar = null; }
+      if (widget) { widget.remove(); widget = null; }
       return;
     }
-    ensureBarStyles();
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.id = 'refollow-bar';
-      bar.setAttribute('style', barStyles());
-      bar.addEventListener('click', (ev) => {
+    if (!widget) {
+      widget = document.createElement('div');
+      widget.id = 'refollow-widget';
+      widget.innerHTML = `<style>${WIDGET_CSS}</style><div id="refollow-pill"></div><div id="refollow-panel" style="display:none"></div>`;
+      widget.addEventListener('click', (ev) => {
+        const panel = widget.querySelector('#refollow-panel');
         const act = ev.target && ev.target.dataset && ev.target.dataset.act;
-        if (!act) return;
-        ev.preventDefault(); ev.stopPropagation();
-        const handle = curHandle();
-        if (act === 'start') {
-          startTask(handle).then((r) => log('状态条启动: ' + (r.message || r.ok)));
-        } else if (act === 'refresh') requestRefresh();
-        else if (act === 'pause') pauseTask(handle, 'manual');
-        else if (act === 'resume') resumeTask(handle);
-        else if (act === 'hide') { bar.remove(); bar = null; }
+        if (act) {
+          ev.preventDefault(); ev.stopPropagation();
+          const handle = curHandle();
+          if (act === 'start') startTask(handle);
+          else if (act === 'refresh') requestRefresh();
+          else if (act === 'pause') pauseTask(handle, 'manual');
+          else if (act === 'resume') resumeTask(handle);
+          return;
+        }
+        if (ev.target.closest('#refollow-pill')) {
+          panelOpen = !panelOpen;
+          panel.style.display = panelOpen ? 'block' : 'none';
+          renderWidget();
+        }
       });
-      document.documentElement.appendChild(bar);
+      document.documentElement.appendChild(widget);
     }
-    renderBar();
+    positionWidget();
+    renderWidget();
   }
   intervals.push(setInterval(ensureBar, 1000));
-
   // 清理旧版单账号键(改为按账号分键前的遗留数据)
   chrome.storage.local.remove(['rf_task', 'rf_daily']);
 })();
