@@ -119,8 +119,12 @@
 
   // ---------- 通用工具 ----------
   // 纯逻辑(parseFollowers/interpret/mergeUsers/...)在 shared/logic.js, 有单元测试覆盖
-  const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName } =
-    globalThis.RefollowLogic;
+  const L = globalThis.RefollowLogic;
+  if (!L) {
+    // logic.js 未先于本文件执行 → manifest 清单被浏览器缓存/加载目录不对。直接给出可定位的报错
+    throw new Error('[Refollow] shared/logic.js 未加载: 请在 chrome://extensions 移除插件后重新「加载已解压的扩展程序」选 extension/ 目录, 并硬刷新(Ctrl+Shift+R) x.com 页面');
+  }
+  const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName } = L;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
   async function sleepInterruptible(ms) {
