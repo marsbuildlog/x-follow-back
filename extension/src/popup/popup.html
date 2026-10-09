@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <style>
-    body { width: 240px; font: 13px/1.6 -apple-system, system-ui, sans-serif; padding: 16px; color: #0f1419; margin: 0; }
+    body { width: 280px; font: 13px/1.6 -apple-system, system-ui, sans-serif; padding: 16px; color: #0f1419; margin: 0; }
     .head { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; }
+    #reload { margin-left: auto; color: #536471; font-size: 15px; font-weight: 400; cursor: pointer; padding: 0 2px; }
+    #reload:hover { color: #1d9bf0; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: #536471; flex: none; }
     #state { color: #536471; font-size: 12px; margin: 2px 0 12px; }
     .nums { display: flex; align-items: baseline; gap: 6px; }
@@ -17,8 +19,10 @@
     button.ghost { background: #fff; color: #1d9bf0; border: 1px solid #1d9bf0; font-weight: 400; }
     button.ghost:hover { background: #e8f5fd; }
     .quick { margin-bottom: 12px; }
-    .quick input { width: 100%; box-sizing: border-box; padding: 7px 10px; border: 1px solid #cbd3d9; border-radius: 8px; font-size: 13px; margin-bottom: 6px; }
-    .quick input:focus { outline: none; border-color: #1d9bf0; }
+    .qrow { display: flex; gap: 6px; }
+    .qrow input { flex: 1; min-width: 0; box-sizing: border-box; padding: 7px 10px; border: 1px solid #cbd3d9; border-radius: 8px; font-size: 13px; }
+    .qrow input:focus { outline: none; border-color: #1d9bf0; }
+    .qrow button { width: auto; flex: none; margin-bottom: 0; padding: 7px 10px; font-size: 12px; }
     .quick .hint { color: #536471; font-size: 11px; margin-top: 4px; }
     .links { display: flex; gap: 14px; margin-top: 10px; }
     .links a { color: #1d9bf0; font-size: 12px; text-decoration: none; cursor: pointer; }
@@ -26,17 +30,18 @@
   </style>
 </head>
 <body>
-  <div class="head"><span class="dot" id="dot"></span><span id="handle">—</span></div>
+  <div class="head"><span class="dot" id="dot"></span><span id="handle">—</span><span id="reload" style="display:none" title="重载插件(开发模式): 刷新任务页与当前 x.com 页">↻</span></div>
   <div id="state">读取中…</div>
   <div class="nums"><span id="pending">–</span><span class="lbl">待回关</span><span id="total"></span></div>
   <div id="today"></div>
   <div class="quick">
-    <input id="quick-handle" placeholder="你的X用户名(不带@)" />
-    <button id="btn-open-vf">打开认证粉丝页</button>
+    <div class="qrow">
+      <input id="quick-handle" placeholder="你的X用户名(不带@)" />
+      <button id="btn-open-vf">打开认证粉丝页</button>
+    </div>
     <div class="hint">首次使用: 进入页面后在列表里手动点一次任意用户的「回关」, 插件即完成初始化</div>
   </div>
   <button id="open" class="ghost">打开控制台</button>
-  <button id="reload" style="display:none">↻ 重载插件(刷新任务页与当前页)</button>
   <div class="links"><a id="guide">使用说明 ↗</a></div>
   <script src="popup.js"></script>
 </body>

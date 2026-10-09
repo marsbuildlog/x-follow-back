@@ -76,7 +76,7 @@
   const isDev = !chrome.runtime.getManifest().update_url;
   const reloadBtn = $('reload');
   if (isDev) {
-    reloadBtn.style.display = 'block';
+    reloadBtn.style.display = ''; // 标题栏右上角 ↻ 图标
     reloadBtn.onclick = async () => {
       // 留标记给重启后的 service worker: 把所有 x.com 标签页一起刷新,
       // 免去每次手动 chrome://extensions 刷新 + 手动刷新 x.com
