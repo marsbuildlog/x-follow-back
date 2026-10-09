@@ -7,6 +7,11 @@
 (async () => {
   'use strict';
 
+  // 重复注入守卫: 控制台会在页面早于插件打开时用 scripting API 补注入,
+  // 活体实例直接退出; 孤儿实例在 halt() 时清除本标记并让出消息通道, 让新实例接管。
+  if (window.__rfUiAlive) return;
+  window.__rfUiAlive = true;
+
   // 依赖模块显式加载(不依赖 manifest 里的多文件注入顺序):
   // constants.js 挂 globalThis.RF, logic.js 挂 globalThis.RefollowLogic
   try {
@@ -32,10 +37,13 @@
   // 此时停止一切定时器并清掉自己注入的 DOM, 避免 Extension context invalidated 报错。
   let halted = false;
   const intervals = [];
+  let msgHandler = null;
   function halt() {
     if (halted) return;
     halted = true;
+    delete window.__rfUiAlive;                 // 让出重复注入守卫, 新实例可接管
     for (const id of intervals) clearInterval(id);
+    try { if (msgHandler) chrome.runtime.onMessage.removeListener(msgHandler); } catch {}
     try {
       document.getElementById('refollow-widget')?.remove(); // 新版悬浮控件
       document.getElementById('refollow-bar')?.remove();     // 旧版顶部横条(升级兼容清理)
@@ -587,8 +595,8 @@
   }
 
   // ---------- options 页消息入口 ----------
-  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (halted) { sendResponse({ ok: false, message: 'orphaned content script' }); return true; }
+  msgHandler = (msg, sender, sendResponse) => {
+    if (halted) return false; // 孤儿不响应也不占通道, 让新注入的实例接管
     (async () => {
       try {
         const h = await activeHandle();
@@ -619,7 +627,8 @@
       }
     })();
     return true; // async response
-  });
+  };
+  chrome.runtime.onMessage.addListener(msgHandler);
 
   // ---------- x.com 页面悬浮控件(右上角 pill, 点击展开面板) ----------
   // 不占页面流、不遮挡内容; pill 常显核心数字, 需要用户操作时变红脉动
@@ -825,7 +834,8 @@
     positionWidget();
     renderWidget();
   }
-  intervals.push(setInterval(ensureBar, 1000));
+  // 孤儿自检: 插件被 reload 后 1 秒内触发 halt(), 清守卫标记/移除监听器, 不阻挡新实例接管
+  intervals.push(setInterval(() => { if (!ctxValid()) return; ensureBar(); }, 1000));
   // 清理旧版单账号键(改为按账号分键前的遗留数据)
   chrome.storage.local.remove(['rf_task', 'rf_daily']);
 })();

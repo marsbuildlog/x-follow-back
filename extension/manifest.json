@@ -3,7 +3,7 @@
   "name": "Refollow — 自动回关认证粉丝",
   "version": "0.1.0",
   "description": "自动回关 X(Twitter) 认证粉丝, 支持限流退避、每日上限与状态展示",
-  "permissions": ["storage", "notifications"],
+  "permissions": ["storage", "notifications", "scripting"],
   "host_permissions": ["https://x.com/*"],
   "content_scripts": [
     {

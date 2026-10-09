@@ -21,7 +21,9 @@
   async function findXTab() {
     try {
       const tabs = await chrome.tabs.query({ url: 'https://x.com/*' });
-      return tabs.length ? tabs[0] : null;
+      if (!tabs.length) return null;
+      // 多个 x.com 标签页时优先认证粉丝页(任务页), 其余场景取第一个
+      return tabs.find((t) => /\/verified_followers/.test(t.url || '')) || tabs[0];
     } catch {
       return null;
     }
@@ -44,6 +46,21 @@
     opTimer = setTimeout(() => { el.textContent = ''; }, 5000);
   }
 
+  // ---------- 内容脚本自动接入 ----------
+  // x.com 页面在插件安装/重载之前打开时, 内容脚本不在(或已是孤儿)——控制台拿不到任务状态。
+  // 连续两次无响应(避开页面刚打开、脚本还在初始化的竞态)后, 用 scripting API 补注入:
+  // 先 MAIN world 恢复请求捕获(page-hook 自带去重守卫), 再隔离世界接管 UI 与任务。
+  let deadPings = 0;
+  let lastInjectAt = 0;
+  async function injectContentScript(tab) {
+    if (Date.now() - lastInjectAt < 10_000) return;
+    lastInjectAt = Date.now();
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/page-hook.js'], world: 'MAIN' });
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/content.js'] });
+    } catch {}
+  }
+
   // ---------- 渲染 ----------
   const statusPill = (s) => `<span class="pill st-${s}">${s === 'pending' ? '待处理' : s === 'failed' ? '失败' : s === 'done' ? '完成' : s}</span>`;
 
@@ -61,6 +78,7 @@
     // 任务状态行
     const task = targetTabId != null ? await send('get-task') : null;
     if (task && task.state) {
+      deadPings = 0;
       const q = task.queue || [];
       const counts = { pending: 0, failed: 0, done: 0, skipped: 0 };
       for (const i of q) counts[i.status] = (counts[i.status] || 0) + 1;
@@ -92,7 +110,30 @@
       $('queue-summary').textContent =
         (rows.length > MAX_ROWS ? `仅显示前 ${MAX_ROWS} 条 / 共 ${rows.length} 条 · ` : '') +
         `跳过(已关注) ${counts.skipped} 项不列出`;
+    } else if (tab) {
+      // 标签页在, 但拿不到任务状态: 区分「脚本在线但无活跃账号」和「脚本未接管」
+      const clearQueue = () => {
+        $('cnt-todo').textContent = '';
+        $('cnt-done').textContent = '';
+        $('queue-table').querySelector('tbody').innerHTML = '';
+        $('queue-summary').textContent = '';
+      };
+      if (task === null) {
+        // content script 在线, 只是还没有活跃账号(get-task 返回 null)
+        deadPings = 0;
+        $('task-state').textContent = '状态: 未启动(先在上方输入用户名打开认证粉丝页)';
+        clearQueue();
+      } else {
+        deadPings++;
+        if (deadPings >= 2) await injectContentScript(tab);
+        $('task-state').innerHTML =
+          'x.com 标签页已打开, 但插件尚未接管(页面可能早于插件安装/重载)。正在自动注入…' +
+          '若约10秒后仍是本行, 请手动刷新该 x.com 标签页(F5)。' +
+          (task && task.message ? `<br><span style="color:#b02a37">${esc(task.message)}</span>` : '');
+        clearQueue();
+      }
     } else {
+      deadPings = 0;
       $('task-state').textContent = '状态: 未知(无 x.com 标签页)';
       $('cnt-todo').textContent = '';
       $('cnt-done').textContent = '';
