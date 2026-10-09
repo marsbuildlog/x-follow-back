@@ -1,10 +1,24 @@
 // 隔离世界 content script: 页面桥接、任务执行器、x.com 页面状态条。
 // 任务循环跑在 x.com 标签页内(不依赖 MV3 service worker 常驻),
 // 状态全部持久化到 chrome.storage.local, 页面刷新/重开后可恢复。
-(() => {
+(async () => {
   'use strict';
 
-  const K = RF.KEY;
+  // 依赖模块显式加载(不依赖 manifest 里的多文件注入顺序):
+  // constants.js 挂 globalThis.RF, logic.js 挂 globalThis.RefollowLogic
+  try {
+    await import(chrome.runtime.getURL('src/shared/constants.js'));
+    await import(chrome.runtime.getURL('src/shared/logic.js'));
+  } catch (e) {
+    throw new Error('[Refollow] 依赖模块动态加载失败: ' + ((e && e.message) || e));
+  }
+  const RFg = globalThis.RF;
+  const L = globalThis.RefollowLogic;
+  if (!RFg || !L) {
+    throw new Error('[Refollow] 依赖模块执行后未挂载全局(RF/RefollowLogic)');
+  }
+
+  const K = RFg.KEY;
   const OP_FOLLOWERS = 'BlueVerifiedFollowers'; // 认证粉丝列表(GraphQL)
   const FOLLOW_API = '/i/api/1.1/friendships/create.json'; // 回关动作: v1.1 REST, 非 GraphQL(实测确认)
   const FOLLOWING_LIST_API = '/i/api/1.1/friends/following/list.json'; // 我的关注列表(页面自身用它判断回关状态)
@@ -118,12 +132,7 @@
   }
 
   // ---------- 通用工具 ----------
-  // 纯逻辑(parseFollowers/interpret/mergeUsers/...)在 shared/logic.js, 有单元测试覆盖
-  const L = globalThis.RefollowLogic;
-  if (!L) {
-    // logic.js 未先于本文件执行 → manifest 清单被浏览器缓存/加载目录不对。直接给出可定位的报错
-    throw new Error('[Refollow] shared/logic.js 未加载: 请在 chrome://extensions 移除插件后重新「加载已解压的扩展程序」选 extension/ 目录, 并硬刷新(Ctrl+Shift+R) x.com 页面');
-  }
+  // 纯逻辑(parseFollowers/interpret/mergeUsers/...)在 shared/logic.js(顶部已显式 import), 有单元测试覆盖
   const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName } = L;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));

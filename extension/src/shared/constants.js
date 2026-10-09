@@ -1,4 +1,5 @@
-// 全局常量: content script 与 options 页共用(manifest 中先后加载)
+// 全局常量: options 页(<script> 标签)与 content.js(动态 import)共用。
+// 挂在 globalThis 上: content.js 会用 await import() 显式加载本文件并等待挂载完成。
 const RF = {
   KEY: {
     settings: 'rf_settings',
@@ -17,3 +18,4 @@ const RF = {
     rateLimitBackoffMin: 15, // 命中 429/88 时的单次长退避(分钟)
   },
 };
+globalThis.RF = RF;

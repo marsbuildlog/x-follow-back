@@ -14,13 +14,19 @@
     },
     {
       "matches": ["https://x.com/*"],
-      "js": ["src/shared/constants.js", "src/shared/logic.js", "src/content/content.js"],
+      "js": ["src/content/content.js"],
       "run_at": "document_start"
     }
   ],
   "background": {
     "service_worker": "src/background.js"
   },
+  "web_accessible_resources": [
+    {
+      "resources": ["src/shared/constants.js", "src/shared/logic.js"],
+      "matches": ["https://x.com/*"]
+    }
+  ],
   "options_page": "src/options/options.html",
   "action": {
     "default_title": "Refollow",
