@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    body { width: 220px; font: 13px/1.6 -apple-system, system-ui, sans-serif; padding: 12px; color: #0f1419; }
+    #today { color: #1d9bf0; font-weight: 600; }
+    button { width: 100%; padding: 6px; border: 1px solid #1d9bf0; background: #1d9bf0; color: #fff; border-radius: 16px; cursor: pointer; margin-bottom: 6px; }
+    button.ghost { background: #fff; color: #1d9bf0; }
+    .hint { color: #536471; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div>今日已回关: <span id="today">…</span></div>
+  <div id="state" class="hint"></div>
+  <p>
+    <button id="open">打开控制台</button>
+    <button id="reload" class="ghost" style="display:none">↻ 重载插件(并刷新x.com页面)</button>
+    <span id="dev-hint" class="hint" style="display:none">开发模式: 本地目录导入, 上架后此按钮自动隐藏</span>
+  </p>
+  <script src="popup.js"></script>
+</body>
+</html>

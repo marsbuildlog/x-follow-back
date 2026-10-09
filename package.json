@@ -1,0 +1,9 @@
+{
+  "name": "twitter_refollow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Twitter/X 自动回关认证粉丝插件",
+  "scripts": {
+    "test": "node --test \"extension/test/*.test.js\""
+  }
+}

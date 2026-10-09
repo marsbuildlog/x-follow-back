@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Refollow — 自动回关认证粉丝",
+  "version": "0.1.0",
+  "description": "自动回关 X(Twitter) 认证粉丝, 支持限流退避、每日上限与状态展示",
+  "permissions": ["storage"],
+  "host_permissions": ["https://x.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*"],
+      "js": ["src/shared/logic.js", "src/content/page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://x.com/*"],
+      "js": ["src/shared/constants.js", "src/shared/logic.js", "src/content/content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "options_page": "src/options/options.html",
+  "action": {
+    "default_title": "Refollow",
+    "default_popup": "src/popup/popup.html"
+  }
+}

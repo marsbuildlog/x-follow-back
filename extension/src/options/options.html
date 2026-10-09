@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Refollow 控制台</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 20px; color: #0f1419; }
+    h1 { font-size: 20px; } h2 { font-size: 16px; margin: 24px 0 8px; border-bottom: 1px solid #e1e8ed; padding-bottom: 4px; }
+    section { margin-bottom: 8px; }
+    button { padding: 6px 14px; border: 1px solid #1d9bf0; background: #1d9bf0; color: #fff; border-radius: 16px; cursor: pointer; font-size: 13px; margin-right: 8px; margin-bottom: 8px; }
+    button.ghost { background: #fff; color: #1d9bf0; }
+    button.danger { background: #fff; color: #d33; border-color: #d33; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid #e1e8ed; padding: 4px 8px; text-align: left; }
+    th { background: #f7f9f9; }
+    pre { background: #0f1419; color: #d7dbdc; padding: 12px; border-radius: 8px; font-size: 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+    .hint { color: #536471; font-size: 12px; }
+    .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+    .st-pending { background: #fff4d6; color: #8a6d00; } .st-done { background: #d8f3dc; color: #1b5e20; }
+    .st-failed { background: #fde2e2; color: #b02a37; } .st-skipped { background: #e9ecef; color: #495057; }
+    .st-following { background: #d0ebff; color: #0b5ed7; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+    label { font-size: 13px; }
+    input[type=number] { width: 80px; padding: 4px 6px; }
+    #tab-warn { background: #fff4d6; padding: 8px 12px; border-radius: 8px; color: #8a6d00; display: none; }
+    details summary { cursor: pointer; font-size: 13px; color: #1d9bf0; }
+  </style>
+</head>
+<body>
+  <h1>Refollow 控制台</h1>
+  <div id="tab-warn">未检测到打开的 x.com 标签页——请先打开 https://x.com 并登录。</div>
+
+  <h2>PoC 验证</h2>
+  <section class="hint">
+    步骤: ① 打开 x.com/<你的handle>/verified_followers 并等页面加载 → ② 检查捕获 → ③ 在列表里点一次「回关」按钮(首次运行需要; 回关模板会存到本地, 页面刷新后仍可用, 仅过期时才需重按) → ④ 拉取认证粉丝 → ⑤ 任务自动开始回关。
+  </section>
+  <section>
+    <button id="btn-check" class="ghost">检查捕获</button>
+    <button id="btn-fetch" class="ghost">拉取认证粉丝</button>
+    <button id="btn-follow-one" class="ghost">关注第 1 个待回关</button>
+    <span id="captured-info" class="hint"></span>
+    <div id="fetch-progress" class="hint" style="color:#1d9bf0"></div>
+  </section>
+
+  <h2>任务</h2>
+  <section class="row">
+    <span id="task-state" class="hint"></span>
+    <button id="btn-start">启动任务</button>
+    <button id="btn-refresh" class="ghost" title="重新拉取认证粉丝, 新粉丝自动加入队列, 运行中也可用">更新列表</button>
+    <button id="btn-pause" class="ghost">暂停</button>
+    <button id="btn-resume" class="ghost">恢复</button>
+    <button id="btn-reset" class="danger">重置任务</button>
+  </section>
+  <section>
+    <table id="queue-table">
+      <thead><tr><th style="width:120px">状态</th><th style="width:140px">账号</th><th>昵称</th><th>出错信息</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="hint" id="queue-summary"></div>
+  </section>
+
+  <h2>设置</h2>
+  <section class="row">
+    <label>每日上限 <input type="number" id="s-dailyLimit" /></label>
+    <label>间隔下限(秒) <input type="number" id="s-intervalMin" /></label>
+    <label>间隔上限(秒) <input type="number" id="s-intervalMax" /></label>
+    <label>持续失败暂停(分钟) <input type="number" id="s-stallMin" /></label>
+    <label>自动恢复间隔(分钟) <input type="number" id="s-autoResumeMin" /></label>
+    <button id="btn-save-settings" class="ghost">保存设置</button>
+  </section>
+
+  <h2>日志</h2>
+  <details open><summary>展开/收起</summary><pre id="log"></pre></details>
+
+  <h2>PoC 原始输出</h2>
+  <pre id="raw">（操作结果会显示在这里）</pre>
+
+  <script src="../shared/constants.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
