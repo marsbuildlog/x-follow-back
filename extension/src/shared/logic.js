@@ -85,13 +85,26 @@
       out.errorText = '429 Rate limit exceeded';
       return out;
     }
-    if (res.status === 403) {
-      out.errorText = '403 (大概率是回关请求模板已过期——在认证粉丝列表里点一次「回关」即可刷新) ' + String(res.body || '').slice(0, 150);
-      return out;
-    }
     let data = null;
     try { data = JSON.parse(res.body); } catch {}
     const bodyText = res.body || '';
+    if (res.status === 403) {
+      // 实测: 161(单日关注上限)等业务错误会包在 HTTP 403 里返回,
+      // 必须先解析错误码, 否则会误判为模板过期
+      const errs403 = data && data.errors;
+      if (Array.isArray(errs403) && errs403.length) {
+        if (errs403.some((e) => e.code === 161)) {
+          out.followLimited = true;
+          out.errorText = '今日关注已超过上限(161), 明日 00:05 自动恢复';
+          return out;
+        }
+        out.errorText = errs403.map((e) => `${e.code} ${e.message}`).join('; ').slice(0, 200);
+        if (errs403.some((e) => e.code === 88 || /rate limit/i.test(e.message || ''))) out.rateLimited = true;
+        return out;
+      }
+      out.errorText = '403 (大概率是回关请求模板已过期——在认证粉丝列表里点一次「回关」即可刷新) ' + String(res.body || '').slice(0, 150);
+      return out;
+    }
     // 已关注/重复关注视为成功(幂等)
     if (/already|已经关注/i.test(bodyText.slice(0, 2000))) { out.ok = true; return out; }
     const errs = data && data.errors;

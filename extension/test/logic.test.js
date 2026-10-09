@@ -164,6 +164,20 @@ test('interpret: already followed 视为成功(幂等)', () => {
   assert.equal(r.ok, true);
 });
 
+test('interpret: 403 包裹的 code 161 判定为今日上限(实测样本)', () => {
+  const body = JSON.stringify({ errors: [{ code: 161, message: 'You are unable to follow more people at this time. Learn more <a href=...>' }] });
+  const r = interpret({ status: 403, ok: false, body });
+  assert.equal(r.followLimited, true);
+  assert.equal(r.rateLimited, false);
+  assert.match(r.errorText, /已超过上限/);
+});
+
+test('interpret: 403 无已知错误码 → 提示模板过期', () => {
+  const r = interpret({ status: 403, ok: false, body: 'Forbidden' });
+  assert.equal(r.followLimited, false);
+  assert.match(r.errorText, /模板已过期/);
+});
+
 test('interpret: 其他 5xx 记录原始错误', () => {
   const r = interpret({ status: 503, ok: false, body: 'upstream connect error' });
   assert.equal(r.ok, false);

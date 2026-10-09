@@ -53,7 +53,7 @@ x.com 标签页
         已关注过滤: 只信列表自带 relationship_perspectives.following
       回关循环(消费者): 只消费 pending, 随机间隔3~8s 逐个关注
         失败处理: 429/88→不标失败, 按 reset 精确等待后重试同一人(连续3次才跳过); remaining=0→主动等重置不吃429
-                  403→立即暂停(template-expired)+系统通知; 161→暂停至次日+通知
+                  403+161→今日上限暂停至次日+通知; 纯403→立即暂停(template-expired)+通知
                   请求层连续异常2次→暂停(error)+通知; 连续失败30min→暂停(stalled)+通知
         队列空→done(等待新粉); 拉取器写入新 pending 后自动续跑
         暂停恢复: 手动恢复随时; stalled/error 到点自动尝试; 所有自动暂停发 Chrome 系统通知(带声音)
