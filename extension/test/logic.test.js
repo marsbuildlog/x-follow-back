@@ -7,6 +7,7 @@ require('../src/shared/logic.js');
 const {
   localDateStr, rolloverDaily, atName, parseFollowers, interpret,
   mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
+  rateLimitBackoffMs, windowExhaustedWaitMs,
 } = globalThis.RefollowLogic;
 
 // ---------- 测试工具 ----------
@@ -106,6 +107,41 @@ test('interpret: 429 判定为限流', () => {
   const r = interpret({ status: 429, ok: false, body: '' });
   assert.equal(r.rateLimited, true);
   assert.equal(r.ok, false);
+});
+
+test('interpret: 透传响应头限流信息(rl)', () => {
+  const r = interpret({ status: 429, ok: false, body: '', rl: { limit: 50, remaining: 0, reset: 1900000000 } });
+  assert.equal(r.rateLimited, true);
+  assert.equal(r.rateReset, 1900000000);
+  assert.equal(r.rateRemaining, 0);
+  // 无 rl 头时不设置字段
+  const r2 = interpret({ status: 200, ok: true, body: '{}' });
+  assert.equal(r2.rateReset, undefined);
+  // rl 头字段非数值时忽略
+  const r3 = interpret({ status: 200, ok: true, body: '{}', rl: { reset: 'NaN' } });
+  assert.equal(r3.rateReset, undefined);
+});
+
+test('rateLimitBackoffMs: 有 reset 头时精确等到窗口重置+缓冲', () => {
+  const now = 1_000_000_000_000;
+  const reset = Math.floor(now / 1000) + 120; // 120秒后重置
+  const ms = rateLimitBackoffMs({ rateReset: reset }, now, 15 * 60_000);
+  assert.equal(ms, 120 * 1000 + 5000); // reset + 5秒缓冲
+});
+
+test('rateLimitBackoffMs: reset 已过不等待, 无头用兜底, 异常大值封顶20分钟', () => {
+  const now = 1_000_000_000_000;
+  assert.equal(rateLimitBackoffMs({ rateReset: Math.floor(now / 1000) - 10 }, now, 60_000), 0);
+  assert.equal(rateLimitBackoffMs({}, now, 60_000), 60_000);
+  assert.equal(rateLimitBackoffMs({ rateReset: Math.floor(now / 1000) + 9999 }, now, 60_000), 20 * 60_000);
+});
+
+test('windowExhaustedWaitMs: remaining=0 时等到重置, 否则为 0', () => {
+  const now = 1_000_000_000_000;
+  const reset = Math.floor(now / 1000) + 60;
+  assert.equal(windowExhaustedWaitMs({ rateRemaining: 0, rateReset: reset }, now), 60 * 1000 + 5000);
+  assert.equal(windowExhaustedWaitMs({ rateRemaining: 3, rateReset: reset }, now), 0);
+  assert.equal(windowExhaustedWaitMs({}, now), 0);
 });
 
 test('interpret: GraphQL code 88 判定为限流', () => {

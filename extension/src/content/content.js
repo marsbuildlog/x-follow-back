@@ -133,7 +133,7 @@
 
   // ---------- 通用工具 ----------
   // 纯逻辑(parseFollowers/interpret/mergeUsers/...)在 shared/logic.js(顶部已显式 import), 有单元测试覆盖
-  const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName } = L;
+  const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName, rateLimitBackoffMs, windowExhaustedWaitMs } = L;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
   async function sleepInterruptible(ms) {
@@ -180,7 +180,10 @@
         const variables = { ...(entry.variables || {}), count, cursor };
         delete variables.screen_name;
         const res = await callGraphQL(OP_FOLLOWERS, variables);
-        if (res.status === 429) throw new Error('429 限流, 稍后再试');
+        if (res.status === 429) {
+          const waitMs = rateLimitBackoffMs(interpret(res), Date.now(), 15 * 60_000);
+          throw new Error(`429 限流, ${Math.round(waitMs / 1000)}秒后窗口重置再试`);
+        }
         const parsed = parseFollowers(res.body);
         if (parsed.error) throw new Error(parsed.error);
         if (page === 0 && parsed.firstRaw) {
@@ -412,6 +415,12 @@
           d.followed++;
           await store.set(K.daily, d);
           await log(`已关注 ${atName(current)}, 今日 ${d.followed}`);
+          // 主动限流: 窗口次数耗尽时等到 reset 再发下一个, 避免吃 429
+          const pw = windowExhaustedWaitMs(r, Date.now());
+          if (pw > 0) {
+            await log(`本窗口次数已用完(remaining=0), ${Math.round(pw / 1000)}秒后窗口重置自动继续`);
+            if (!(await sleepInterruptible(pw))) break;
+          }
         } else {
           current.status = 'failed';
           current.error = r.errorText;
@@ -425,10 +434,16 @@
             // 161: 达到关注上限 → 视同当日额度用完
             await pauseTask('daily-limit', nextMidnight());
           } else if (r.rateLimited) {
-            // 429/88: 长退避后重试, 不直接算 stall
+            // 429/88: 按响应头 x-rate-limit-reset 精确等到窗口重置; 无头时退回固定退避; 不直接算 stall
             await saveTask(task);
-            const backoff = settings.rateLimitBackoffMin * 60_000;
-            await log(`限流, 退避 ${settings.rateLimitBackoffMin} 分钟`);
+            const backoff = rateLimitBackoffMs(r, Date.now(), settings.rateLimitBackoffMin * 60_000);
+            if (backoff <= 0) {
+              await log('限流但窗口已重置, 立即重试');
+            } else if (r.rateReset) {
+              await log(`限流, 窗口 ${new Date(r.rateReset * 1000).toLocaleTimeString()} 重置, ${Math.round(backoff / 1000)}秒后自动继续`);
+            } else {
+              await log(`限流(响应头无 reset), 退避 ${settings.rateLimitBackoffMin} 分钟`);
+            }
             if (!(await sleepInterruptible(backoff))) break;
           } else if (stall.shouldPause) {
             await pauseTask('stalled', Date.now() + settings.autoResumeMin * 60_000);

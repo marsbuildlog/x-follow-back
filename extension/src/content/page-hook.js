@@ -171,6 +171,18 @@
     return origSend.apply(this, arguments);
   };
 
+  // 提取限流响应头(15 分钟窗口): remaining=窗口内剩余次数, reset=窗口重置时刻(UTC epoch 秒)
+  function rateLimitHeaders(res) {
+    const rl = {};
+    try {
+      for (const k of ['limit', 'remaining', 'reset']) {
+        const v = res.headers && res.headers.get('x-rate-limit-' + k);
+        if (v != null && v !== '') rl[k] = Number(v);
+      }
+    } catch {}
+    return rl;
+  }
+
   // ---- 消息响应 ----
   window.addEventListener('message', async (ev) => {
     if (ev.source !== window) return;
@@ -222,7 +234,7 @@
         }
         const res = await origFetch.call(window, url, init);
         const body = await res.text();
-        reply({ status: res.status, ok: res.ok, body });
+        reply({ status: res.status, ok: res.ok, body, rl: rateLimitHeaders(res) });
       } catch (e) {
         reply({ status: -1, ok: false, body: String(e) });
       }
@@ -241,7 +253,7 @@
         const { url, init } = globalThis.RefollowLogic.buildApiRequest(entry, params, currentCsrf());
         const res = await origFetch.call(window, url, init);
         const body = await res.text();
-        reply({ status: res.status, ok: res.ok, body });
+        reply({ status: res.status, ok: res.ok, body, rl: rateLimitHeaders(res) });
       } catch (e) {
         reply({ status: -1, ok: false, body: String(e) });
       }

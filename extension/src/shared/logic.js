@@ -72,8 +72,14 @@
   }
 
   // 解释关注/查询接口返回, 归类错误(驱动限流退避/暂停决策)
+  // res.rl: 响应头限流信息 {limit, remaining, reset}(reset 为 UTC epoch 秒), 由 page-hook 重放时提取
   function interpret(res) {
     const out = { ok: false, rateLimited: false, followLimited: false, errorText: `HTTP ${res.status}` };
+    const rl = res && res.rl;
+    if (rl && Number.isFinite(rl.reset)) {
+      out.rateReset = rl.reset; // 窗口重置时刻(epoch 秒)
+      if (Number.isFinite(rl.remaining)) out.rateRemaining = rl.remaining;
+    }
     if (res.status === 429) {
       out.rateLimited = true;
       out.errorText = '429 Rate limit exceeded';
@@ -98,6 +104,25 @@
     if (res.ok) out.ok = true;
     else out.errorText = `HTTP ${res.status} ${String(res.body || '').slice(0, 200)}`;
     return out;
+  }
+
+  // 429 后应等待的毫秒数: 优先按响应头 x-rate-limit-reset 精确等到窗口重置(+缓冲),
+  // 无响应头时退回固定退避(fallbackMs)。上限 20 分钟防异常值; reset 已过则不等待。
+  function rateLimitBackoffMs(r, now, fallbackMs, bufMs = 5000) {
+    if (r && Number.isFinite(r.rateReset)) {
+      const wait = r.rateReset * 1000 + bufMs - now;
+      if (wait <= 0) return 0;
+      return Math.min(wait, 20 * 60_000);
+    }
+    return fallbackMs;
+  }
+
+  // 主动限流: 未 429 但窗口次数耗尽(remaining=0)时, 也等到 reset 再发下一个, 避免吃 429
+  function windowExhaustedWaitMs(r, now, bufMs = 5000) {
+    if (r && r.rateRemaining === 0 && Number.isFinite(r.rateReset)) {
+      return Math.max(0, Math.min(r.rateReset * 1000 + bufMs - now, 20 * 60_000));
+    }
+    return 0;
   }
 
   // 队列合并: 新人追加(已关注标 skipped), 已关注的 pending 补标 skipped; 返回新增数。
@@ -171,5 +196,6 @@
   globalThis.RefollowLogic = {
     localDateStr, rolloverDaily, atName, parseFollowers, interpret,
     mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
+    rateLimitBackoffMs, windowExhaustedWaitMs,
   };
 })();

@@ -46,7 +46,8 @@ x.com 标签页
       启动时 await import() 显式加载 shared/constants.js 与 shared/logic.js 并校验挂载
       (⚠ 不用 manifest 多文件列表保证顺序: Chrome 的多文件注入顺序不可靠, 出过 logic.js 未执行的确定性 bug)
       任务执行器: 拉粉丝→过滤已关注→逐个关注(随机间隔30~90s)
-      失败处理: 429/88→退避15min; 161→当日停止; 连续失败30min→暂停
+      失败处理: 429/88→按 x-rate-limit-reset 精确等待窗口重置(无头时固定退避); remaining=0→主动等重置不吃429
+                  161→暂停至次日; 连续失败30min→暂停
       暂停恢复: 手动恢复; 未恢复则每小时自动尝试
       状态条: verified_followers 页顶部注入(进度/今日数/操作按钮)
       状态持久化: chrome.storage.local, 刷新/重开浏览器可恢复
