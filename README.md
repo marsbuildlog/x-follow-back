@@ -1,5 +1,7 @@
-# XFollowBack — X (Twitter) 自动回关认证粉丝
+<div align="center">
+<img src="og-image.png" alt="XFollowBack — X (Twitter) 自动回关认证粉丝" width="820">
 
+# XFollowBack — X (Twitter) 自动回关认证粉丝
 一个 Chrome / Edge 浏览器插件 (Manifest V3),自动回关你的 X (Twitter) **蓝V认证粉丝**,带限流退避、每日上限与实时状态展示。
 
 ## ✨ 特性
@@ -54,3 +56,5 @@ npm test
 ## ⚠️ 免责声明
 
 本项目仅供学习研究使用。自动化操作可能违反 X 的服务条款,请自行评估使用风险,作者不对账号受限等后果负责。
+
+</div>
