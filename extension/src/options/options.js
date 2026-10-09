@@ -174,10 +174,7 @@
   }
 
   // ---------- 按钮 ----------
-  // 启动/更新列表在认证粉丝页悬浮控件上(依赖页面路径, 控制台发多半报错);
-  // 这里只留跨页面可用的遥控: 暂停/恢复(按活跃账号, 不依赖当前路径) + 重置
-  $('btn-pause').onclick = async () => { await send('pause-task'); showOp('已请求暂停'); render(); };
-  $('btn-resume').onclick = async () => { await send('resume-task'); showOp('已请求恢复'); render(); };
+  // 任务操作(启动/更新/暂停/恢复)都在认证粉丝页悬浮控件上, 控制台只留重置
   $('btn-reset').onclick = async () => {
     if (!confirm('确定重置任务? 当前账号的队列与进度将被清空。')) return;
     await send('reset-task');

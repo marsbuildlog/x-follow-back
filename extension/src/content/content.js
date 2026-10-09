@@ -602,7 +602,6 @@
         const h = await activeHandle();
         switch (msg && msg.cmd) {
           case 'ping': sendResponse({ ok: true }); break;
-          case 'get-captured': sendResponse(await callPage('list-captured', {})); break;
           case 'get-task': {
             const t = h ? { ...(await getTask(h)), daily: await getDaily(h) } : null;
             if (t) {
@@ -614,8 +613,6 @@
             sendResponse(t);
             break;
           }
-          case 'pause-task': await pauseTask(h, 'manual'); sendResponse({ ok: true }); break;
-          case 'resume-task': sendResponse(await resumeTask(h)); break;
           case 'reset-task': await store.set(taskKey(h), null); sendResponse({ ok: true }); break;
           case 'test-follow-one': sendResponse(await testFollowOne(h)); break;
           default: sendResponse({ ok: false, message: 'unknown cmd' });
