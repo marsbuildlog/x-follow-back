@@ -137,14 +137,17 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
   async function sleepInterruptible(ms) {
-    const step = 1000;
-    for (let t = 0; t < ms; t += step) {
-      await sleep(step);
+    // 按 deadline 分段休眠(每段≤30s), 不逐秒轮询: 后台标签页的定时器会被 Chrome 节流到约1次/分钟,
+    // 逐秒 setTimeout 会把 12 分钟的窗口等待拖成小时级; 按 deadline 判断则最多慢约 1 分钟
+    const deadline = Date.now() + ms;
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return true;
+      await sleep(Math.min(remaining, 30_000));
       const task = await store.get(K.task, null);
       if (!task || task.state !== 'running') return false;
       if (!(await isLockMine())) return false;
     }
-    return true;
   }
 
   // (interpret/parseFollowers 等纯逻辑在 shared/logic.js, 有单元测试覆盖)
