@@ -20,8 +20,9 @@
     table { border-collapse: collapse; width: 100%; font-size: 13px; }
     th, td { border: 1px solid #e1e8ed; padding: 4px 8px; text-align: left; }
     th { background: #f7f9f9; position: sticky; top: 0; }
-    #queue-wrap { max-height: 420px; overflow: auto; border-bottom: 1px solid #e1e8ed; }
-    pre { background: #0f1419; color: #d7dbdc; padding: 12px; border-radius: 8px; font-size: 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+    #queue-wrap { height: 300px; overflow: auto; border-bottom: 1px solid #e1e8ed; }
+    pre { background: #0f1419; color: #d7dbdc; padding: 12px; border-radius: 8px; font-size: 12px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+    #log { height: 300px; }
     .hint { color: #536471; font-size: 12px; }
     .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
     .st-pending { background: #fff4d6; color: #8a6d00; } .st-done { background: #d8f3dc; color: #1b5e20; }
@@ -54,7 +55,7 @@
     <button class="tab" data-tab="done">已完成 <span id="cnt-done"></span></button>
   </div>
   <div id="queue-wrap">
-    <table>
+    <table id="queue-table">
       <thead><tr><th style="width:70px">状态</th><th style="width:140px">账号</th><th>昵称</th><th>出错信息</th><th style="width:110px">完成时间</th></tr></thead>
       <tbody></tbody>
     </table>

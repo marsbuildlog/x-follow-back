@@ -625,8 +625,8 @@
   let cachedFetchProgress = null;
 
   const WIDGET_CSS = `
-    #refollow-widget { position: fixed; top: 60px; z-index: 99999; display: flex; flex-direction: column; align-items: flex-end;
-      pointer-events: none; font: 13px/1.5 -apple-system, system-ui, sans-serif; }
+    #refollow-widget { position: fixed; top: 20px; z-index: 99999; display: flex; flex-direction: column; align-items: flex-end;
+      padding-right: 10px; pointer-events: none; font: 13px/1.5 -apple-system, system-ui, sans-serif; }
     #refollow-widget > * { pointer-events: auto; }
     #refollow-pill { display: flex; align-items: center; gap: 8px; padding: 8px 18px; border-radius: 9999px;
       background: #1d9bf0; color: #fff; border: 1px solid #1a8cd8; box-shadow: 0 2px 12px rgba(0,0,0,.25);
