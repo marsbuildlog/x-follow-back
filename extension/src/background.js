@@ -1,6 +1,8 @@
 // MV3 service worker: 长任务不在这里跑, 全部在 x.com 标签页的 content script 内执行。
 // 职责:
-//   1. 开发模式下 popup 点「重载插件」后, 自动刷新所有 x.com 标签页
+//   1. 开发模式下 popup 点「重载插件」后, 刷新跑任务的认证粉丝页 + 当前活跃的 x.com 页
+//      (扩展重启后所有旧 content script 变孤儿, 页面必须刷新才能重新注入;
+//       其余 x.com 页不刷, 避免丢失页面内状态如草稿)
 //   2. 代理系统通知(chrome.notifications 仅扩展页面可用, content script 无权调用)
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -40,9 +42,15 @@ function notify(tag, title, message) {
 chrome.storage.local.get('rf_reload_tabs').then(({ rf_reload_tabs }) => {
   if (!rf_reload_tabs) return;
   chrome.storage.local.remove('rf_reload_tabs');
-  chrome.tabs.query({ url: 'https://x.com/*' }).then((tabs) => {
-    for (const t of tabs) chrome.tabs.reload(t.id);
-  });
+  (async () => {
+    const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const xTabs = await chrome.tabs.query({ url: 'https://x.com/*' });
+    for (const t of xTabs) {
+      const isTaskPage = /\/verified_followers/.test(t.url || '');
+      const isActiveX = !!active && t.id === active.id && (t.url || '').startsWith('https://x.com/');
+      if (isTaskPage || isActiveX) chrome.tabs.reload(t.id);
+    }
+  })();
 });
 
 chrome.runtime.onInstalled.addListener(() => {

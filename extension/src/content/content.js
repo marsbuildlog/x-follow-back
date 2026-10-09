@@ -621,7 +621,7 @@
 
   const WIDGET_CSS = `
     #refollow-widget { position: fixed; top: 20px; z-index: 99999; display: flex; flex-direction: column; align-items: flex-end;
-      padding-right: 10px; pointer-events: none; font: 13px/1.5 -apple-system, system-ui, sans-serif; }
+      pointer-events: none; font: 13px/1.5 -apple-system, system-ui, sans-serif; }
     #refollow-widget > * { pointer-events: auto; }
     #refollow-pill { display: flex; align-items: center; gap: 8px; padding: 8px 18px; border-radius: 9999px;
       background: #1d9bf0; color: #fff; border: 1px solid #1a8cd8; box-shadow: 0 2px 12px rgba(0,0,0,.25);
@@ -630,7 +630,8 @@
     #refollow-pill .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; box-shadow: 0 0 0 2px rgba(255,255,255,.85); }
     #refollow-pill.alert { background: #dc2626; border-color: #dc2626; animation: refollowPulse 1.2s ease-in-out infinite; }
     @keyframes refollowPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
-    #refollow-panel { width: 340px; margin-top: 8px; background: #fff; color: #0f1419; border: 1px solid #e1e8ed;
+    #refollow-panel { position: absolute; top: calc(100% + 8px); right: 0; width: 340px;
+      background: #fff; color: #0f1419; border: 1px solid #e1e8ed;
       border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.22); padding: 14px 16px; }
     #refollow-panel .rf-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
     #refollow-panel .rf-head span { color: #536471; font-size: 12px; }
@@ -723,10 +724,30 @@
     `;
   }
 
-  // 定位到认证关注者页顶部姓名行右侧(主列右缘), 随窗口/列位置校准
+  // 定位: 紧贴认证关注者页顶部姓名(h2)右侧一点点, 垂直在姓名行父容器内居中;
+  // h2 不可得时退回主列右缘, 再退回右上角
   function positionWidget() {
     if (!widget) return;
     const col = document.querySelector('[data-testid="primaryColumn"]');
+    const h2 = col && (col.querySelector('h2[role="heading"]') || col.querySelector('h2'));
+    if (h2) {
+      // 父容器太矮(纯名字包装层)时向上找有高度的行容器, 最多3层
+      let box = h2.getBoundingClientRect();
+      let parent = h2.parentElement;
+      for (let i = 0; i < 3 && parent && parent !== document.body; i++) {
+        const r = parent.getBoundingClientRect();
+        if (r.height >= 30) { box = r; break; }
+        parent = parent.parentElement;
+      }
+      const hr = h2.getBoundingClientRect();
+      const pill = widget.querySelector('#refollow-pill');
+      const pillH = (pill && pill.offsetHeight) || 36;
+      widget.style.left = Math.round(hr.right + 12) + 'px';
+      widget.style.top = Math.round(box.top + box.height / 2 - pillH / 2) + 'px';
+      widget.style.width = 'auto';
+      widget.style.right = 'auto';
+      return;
+    }
     if (col) {
       const r = col.getBoundingClientRect();
       widget.style.left = Math.round(r.left) + 'px';
