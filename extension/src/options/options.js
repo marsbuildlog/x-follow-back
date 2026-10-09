@@ -13,9 +13,18 @@
   let curTab = 'todo'; // 队列 tab: todo(待处理+失败) | done(已完成)
   let opTimer = null;
 
+  // 插件被 reload 后本页会变成孤儿(chrome.* 全部失效), 需要刷新本页才能恢复
+  function isOrphaned() {
+    try { chrome.runtime.getURL(''); return false; } catch { return true; }
+  }
+
   async function findXTab() {
-    const tabs = await chrome.tabs.query({ url: 'https://x.com/*' });
-    return tabs.length ? tabs[0] : null;
+    try {
+      const tabs = await chrome.tabs.query({ url: 'https://x.com/*' });
+      return tabs.length ? tabs[0] : null;
+    } catch {
+      return null;
+    }
   }
   async function send(cmd, extra = {}) {
     if (targetTabId == null) return { ok: false, message: '未找到 x.com 标签页' };
@@ -39,6 +48,12 @@
   const statusPill = (s) => `<span class="pill st-${s}">${s === 'pending' ? '待处理' : s === 'failed' ? '失败' : s === 'done' ? '完成' : s}</span>`;
 
   async function render() {
+    if (isOrphaned()) {
+      const warn = $('tab-warn');
+      warn.style.display = 'block';
+      warn.textContent = '插件已更新——请按 F5 刷新本页, 恢复控制台功能。';
+      return;
+    }
     const tab = await findXTab();
     targetTabId = tab ? tab.id : null;
     $('tab-warn').style.display = tab ? 'none' : 'block';

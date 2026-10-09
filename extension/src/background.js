@@ -50,6 +50,9 @@ chrome.storage.local.get('rf_reload_tabs').then(({ rf_reload_tabs }) => {
       const isActiveX = !!active && t.id === active.id && (t.url || '').startsWith('https://x.com/');
       if (isTaskPage || isActiveX) chrome.tabs.reload(t.id);
     }
+    // 本扩展自己的页面(如已打开的控制台)也刷新, 避免留在孤儿状态
+    const ownTabs = await chrome.tabs.query({ url: `chrome-extension://${chrome.runtime.id}/*` });
+    for (const t of ownTabs) chrome.tabs.reload(t.id);
   })();
 });
 
