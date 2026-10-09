@@ -1,4 +1,4 @@
-# Refollow — X (Twitter) 自动回关认证粉丝
+# XFollowBack — X (Twitter) 自动回关认证粉丝
 
 一个 Chrome / Edge 浏览器插件 (Manifest V3),自动回关你的 X (Twitter) **蓝V认证粉丝**,带限流退避、每日上限与实时状态展示。
 
@@ -27,7 +27,7 @@
 npm run build
 ```
 
-自动读取 `extension/manifest.json` 的版本号,将插件打包为 `releases/refollow-v{version}.zip`(排除 `test/`),可直接发给他人加载。
+自动读取 `extension/manifest.json` 的版本号,将插件打包为 `releases/x-follow-back-v{version}.zip`(排除 `test/`),可直接发给他人加载。
 
 ## 🔧 工作原理
 

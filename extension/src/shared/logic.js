@@ -200,7 +200,7 @@
     return { url, init };
   }
 
-  globalThis.RefollowLogic = {
+  globalThis.XFollowBackLogic = {
     localDateStr, rolloverDaily, atName, parseFollowers, interpret,
     mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
     rateLimitBackoffMs, windowExhaustedWaitMs,

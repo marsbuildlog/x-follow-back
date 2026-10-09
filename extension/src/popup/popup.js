@@ -55,7 +55,7 @@
   $('open').onclick = () => chrome.runtime.openOptionsPage();
 
   // 使用说明(博客项目页)
-  $('guide').onclick = () => chrome.tabs.create({ url: 'https://marsbuildlog.github.io/refollow/' });
+  $('guide').onclick = () => chrome.tabs.create({ url: 'https://marsbuildlog.github.io/x-follow-back/' });
 
   // 用户名 → 拼接并打开认证粉丝页(新用户只需填自己的用户名)
   const openFollowPage = () => {

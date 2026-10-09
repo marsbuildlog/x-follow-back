@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Refollow — 自动回关认证粉丝",
+  "name": "XFollowBack — 自动回关认证粉丝",
   "version": "0.1.0",
   "description": "自动回关 X(Twitter) 认证粉丝, 支持限流退避、每日上限与状态展示",
   "permissions": ["storage", "notifications", "scripting"],
@@ -32,7 +32,7 @@
   ],
   "options_page": "src/options/options.html",
   "action": {
-    "default_title": "Refollow",
+    "default_title": "XFollowBack",
     "default_popup": "src/popup/popup.html"
   }
 }

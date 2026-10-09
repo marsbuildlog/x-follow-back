@@ -8,7 +8,7 @@ const {
   localDateStr, rolloverDaily, atName, parseFollowers, interpret,
   mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
   rateLimitBackoffMs, windowExhaustedWaitMs,
-} = globalThis.RefollowLogic;
+} = globalThis.XFollowBackLogic;
 
 // ---------- 测试工具 ----------
 // 构造 BlueVerifiedFollowers 风格响应(基于 2026-10 实测结构)

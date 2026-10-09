@@ -21,7 +21,7 @@ chrome.tabs.onRemoved.addListener(async () => {
     const key = 'rf_task:' + h;
     const { [key]: t } = await chrome.storage.local.get(key);
     if (t && t.state === 'running') {
-      notify('tab-closed', 'Refollow 已暂停', 'x.com 页面已关闭, 自动回关已停止; 重新打开认证粉丝页会自动继续');
+      notify('tab-closed', 'XFollowBack 已暂停', 'x.com 页面已关闭, 自动回关已停止; 重新打开认证粉丝页会自动继续');
     }
   } catch {}
 });
@@ -29,10 +29,10 @@ chrome.tabs.onRemoved.addListener(async () => {
 // SW 启动即执行(runtime.reload() 后 Chrome 会拉起新 SW)
 function notify(tag, title, message) {
   try {
-    const p = chrome.notifications.create('refollow-' + tag, {
+    const p = chrome.notifications.create('xfollowback-' + tag, {
       type: 'basic',
       iconUrl: chrome.runtime.getURL('icons/128.png'),
-      title: title || 'Refollow',
+      title: title || 'XFollowBack',
       message: message || '',
       priority: 2,
     });
@@ -57,5 +57,5 @@ chrome.storage.local.get('rf_reload_tabs').then(({ rf_reload_tabs }) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('[Refollow] installed');
+  console.log('[XFollowBack] installed');
 });

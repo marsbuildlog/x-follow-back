@@ -1,4 +1,4 @@
-# Refollow — Twitter/X 自动回关认证粉丝
+# XFollowBack — Twitter/X 自动回关认证粉丝
 
 浏览器插件(Chrome / Edge, MV3)。自动回关蓝V认证粉丝, 带限流退避与状态展示。
 
@@ -25,7 +25,7 @@ npm test        # 仓库根目录运行, 跑核心逻辑单元测试(node ≥ 18
 
 验证两个技术风险点: GraphQL 请求能否在页面上下文重放(关键是 `x-client-transaction-id`)、`verified_followers` 能否翻页拉全。
 
-1. 打开 `https://x.com/<你的handle>/verified_followers`, 等页面加载完(顶部会出现 Refollow 状态条)
+1. 打开 `https://x.com/<你的handle>/verified_followers`, 等页面加载完(顶部会出现 XFollowBack 状态条)
 2. 点插件图标 → 「打开控制台」→ 点 **检查捕获**, 确认操作列表里出现 `BlueVerifiedFollowers`(认证粉丝接口的实际名称)
 3. 在认证粉丝列表里**点一次「回关」按钮**(为了捕获回关请求 `friendships/create.json`), 再点「检查捕获」确认两个关键接口齐全
 4. 点 **拉取认证粉丝** → 观察日志中的分页情况(`第N页: +M, cursor=有/无`), 确认能拉全

@@ -11,15 +11,15 @@
 // 所有请求都在页面上下文里发出, 自带 cookie + 页面级请求头。
 (() => {
   'use strict';
-  if (window.__refollowHook) return;
-  window.__refollowHook = true;
+  if (window.__xfollowbackHook) return;
+  window.__xfollowbackHook = true;
 
   const registry = new Map(); // 'g:<OpName>' | 'p:<path>' -> entry
   const history = [];         // GraphQL 捕获流水(调试用)
   const recent = [];          // 所有 /i/api/ 请求流水(调试用, 含状态码)
   const MAX_HISTORY = 50;
   const MAX_RECENT = 80;
-  const LS_KEY = '__refollow_api_templates'; // POST 类 REST 请求模板持久化(localStorage, x.com 域内)
+  const LS_KEY = '__xfollowback_api_templates'; // POST 类 REST 请求模板持久化(localStorage, x.com 域内)
 
   // 启动时恢复上次会话捕获的模板(重放时自动刷新 csrf, 过期则靠 403 提示重新捕获)
   try {
@@ -187,9 +187,9 @@
   window.addEventListener('message', async (ev) => {
     if (ev.source !== window) return;
     const msg = ev.data;
-    if (!msg || msg.source !== 'refollow-ui') return;
+    if (!msg || msg.source !== 'xfollowback-ui') return;
     const reply = (data) =>
-      window.postMessage({ source: 'refollow-page', type: 'result', id: msg.id, data }, '*');
+      window.postMessage({ source: 'xfollowback-page', type: 'result', id: msg.id, data }, '*');
 
     if (msg.type === 'list-captured') {
       // 对外暴露时剥掉 headers(含 bearer/csrf), 隔离世界不需要它们
@@ -250,7 +250,7 @@
       }
       try {
         // 请求构造逻辑在 shared/logic.js(有单元测试覆盖)
-        const { url, init } = globalThis.RefollowLogic.buildApiRequest(entry, params, currentCsrf());
+        const { url, init } = globalThis.XFollowBackLogic.buildApiRequest(entry, params, currentCsrf());
         const res = await origFetch.call(window, url, init);
         const body = await res.text();
         reply({ status: res.status, ok: res.ok, body, rl: rateLimitHeaders(res) });

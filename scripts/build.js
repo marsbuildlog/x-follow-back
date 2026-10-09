@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 打包 extension/ 为 zip, 输出到 releases/refollow-v{version}.zip
+// 打包 extension/ 为 zip, 输出到 releases/x-follow-back-v{version}.zip
 // 用法: npm run build  (零依赖, 使用系统 zip 命令)
 'use strict';
 
@@ -15,7 +15,7 @@ const outDir = path.join(root, 'releases');
 const { version } = JSON.parse(
   fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'),
 );
-const zipName = `refollow-v${version}.zip`;
+const zipName = `x-follow-back-v${version}.zip`;
 const zipPath = path.join(outDir, zipName);
 
 fs.mkdirSync(outDir, { recursive: true });

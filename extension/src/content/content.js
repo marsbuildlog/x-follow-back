@@ -13,17 +13,17 @@
   window.__rfUiAlive = true;
 
   // 依赖模块显式加载(不依赖 manifest 里的多文件注入顺序):
-  // constants.js 挂 globalThis.RF, logic.js 挂 globalThis.RefollowLogic
+  // constants.js 挂 globalThis.RF, logic.js 挂 globalThis.XFollowBackLogic
   try {
     await import(chrome.runtime.getURL('src/shared/constants.js'));
     await import(chrome.runtime.getURL('src/shared/logic.js'));
   } catch (e) {
-    throw new Error('[Refollow] 依赖模块动态加载失败: ' + ((e && e.message) || e));
+    throw new Error('[XFollowBack] 依赖模块动态加载失败: ' + ((e && e.message) || e));
   }
   const RFg = globalThis.RF;
-  const L = globalThis.RefollowLogic;
+  const L = globalThis.XFollowBackLogic;
   if (!RFg || !L) {
-    throw new Error('[Refollow] 依赖模块执行后未挂载全局(RF/RefollowLogic)');
+    throw new Error('[XFollowBack] 依赖模块执行后未挂载全局(RF/XFollowBackLogic)');
   }
 
   const K = RFg.KEY;
@@ -45,9 +45,9 @@
     for (const id of intervals) clearInterval(id);
     try { if (msgHandler) chrome.runtime.onMessage.removeListener(msgHandler); } catch {}
     try {
-      document.getElementById('refollow-widget')?.remove(); // 新版悬浮控件
-      document.getElementById('refollow-bar')?.remove();     // 旧版顶部横条(升级兼容清理)
-      document.getElementById('refollow-bar-style')?.remove();
+      document.getElementById('xfollowback-widget')?.remove(); // 新版悬浮控件
+      document.getElementById('xfollowback-bar')?.remove();     // 旧版顶部横条(升级兼容清理)
+      document.getElementById('xfollowback-bar-style')?.remove();
     } catch {}
   }
   function ctxValid() {
@@ -131,7 +131,7 @@
   window.addEventListener('message', (ev) => {
     if (ev.source !== window) return;
     const m = ev.data;
-    if (!m || m.source !== 'refollow-page' || m.type !== 'result') return;
+    if (!m || m.source !== 'xfollowback-page' || m.type !== 'result') return;
     if (pendingCalls.has(m.id)) {
       pendingCalls.get(m.id)(m.data);
       pendingCalls.delete(m.id);
@@ -141,7 +141,7 @@
     return new Promise((resolve) => {
       const id = ++msgSeq;
       pendingCalls.set(id, resolve);
-      window.postMessage({ source: 'refollow-ui', type, id, payload }, '*');
+      window.postMessage({ source: 'xfollowback-ui', type, id, payload }, '*');
       setTimeout(() => {
         if (pendingCalls.has(id)) {
           pendingCalls.delete(id);
@@ -343,7 +343,7 @@
       const p = chrome.runtime.sendMessage({
         cmd: 'notify',
         tag: 'pause-' + reason,
-        title: 'Refollow 已暂停',
+        title: 'XFollowBack 已暂停',
         message: PAUSE_ALERTS[reason] || reason,
       });
       if (p && p.catch) p.catch(() => {});
@@ -643,38 +643,38 @@
   let cachedFetchProgress = null;
 
   const WIDGET_CSS = `
-    #refollow-widget { position: fixed; top: 20px; z-index: 99999; display: flex; flex-direction: column; align-items: flex-end;
+    #xfollowback-widget { position: fixed; top: 20px; z-index: 99999; display: flex; flex-direction: column; align-items: flex-end;
       pointer-events: none; font: 13px/1.5 -apple-system, system-ui, sans-serif; }
-    #refollow-widget > * { pointer-events: auto; }
-    #refollow-pill { display: flex; align-items: center; gap: 8px; padding: 8px 18px; border-radius: 9999px;
+    #xfollowback-widget > * { pointer-events: auto; }
+    #xfollowback-pill { display: flex; align-items: center; gap: 8px; padding: 8px 18px; border-radius: 9999px;
       background: #1d9bf0; color: #fff; border: 1px solid #1a8cd8; box-shadow: 0 2px 12px rgba(0,0,0,.25);
       cursor: pointer; user-select: none; white-space: nowrap; font-weight: 700; }
-    #refollow-pill:hover { background: #1a8cd8; }
-    #refollow-pill .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; box-shadow: 0 0 0 2px rgba(255,255,255,.85); }
-    #refollow-pill.alert { background: #dc2626; border-color: #dc2626; animation: refollowPulse 1.2s ease-in-out infinite; }
-    @keyframes refollowPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
-    #refollow-panel { position: absolute; top: calc(100% + 8px); right: 0; width: 340px;
+    #xfollowback-pill:hover { background: #1a8cd8; }
+    #xfollowback-pill .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; box-shadow: 0 0 0 2px rgba(255,255,255,.85); }
+    #xfollowback-pill.alert { background: #dc2626; border-color: #dc2626; animation: xfollowbackPulse 1.2s ease-in-out infinite; }
+    @keyframes xfollowbackPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+    #xfollowback-panel { position: absolute; top: calc(100% + 8px); right: 0; width: 340px;
       background: #fff; color: #0f1419; border: 1px solid #e1e8ed;
       border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.22); padding: 14px 16px; }
-    #refollow-panel .rf-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
-    #refollow-panel .rf-head span { color: #536471; font-size: 12px; }
-    #refollow-panel .rf-status { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-    #refollow-panel .rf-status .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-    #refollow-panel .rf-nums { margin-bottom: 8px; }
-    #refollow-panel .rf-nums b { font-size: 16px; }
-    #refollow-panel .rf-alert { background: #fdecec; color: #b02a37; border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
-    #refollow-panel .rf-err { color: #b02a37; font-size: 12px; margin-bottom: 8px; word-break: break-all; }
-    #refollow-panel .rf-btns { display: flex; gap: 8px; margin-bottom: 8px; }
-    #refollow-panel .rf-guide { background: #e8f5fd; color: #0b5ed7; border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
-    #refollow-panel .rf-msg { background: #e8f5fd; color: #0b5ed7; border-radius: 8px; padding: 6px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
-    #refollow-panel .rf-keep { color: #b45309; font-size: 12px; background: #fff7ed; border-radius: 8px; padding: 6px 10px; }
-    #refollow-widget .rf-btn { padding: 7px 20px; border-radius: 9999px; font-weight: 700; font-size: 13px; cursor: pointer; border: none; }
-    #refollow-widget .rf-btn.primary { background: #1d9bf0; color: #fff; }
-    #refollow-widget .rf-btn.primary:hover { background: #1a8cd8; }
-    #refollow-widget .rf-btn.warn { background: #dc2626; color: #fff; }
-    #refollow-widget .rf-btn.warn:hover { background: #b91c1c; }
-    #refollow-widget .rf-btn.ghost { background: #fff; color: #1d9bf0; border: 1px solid #1d9bf0; font-weight: 400; }
-    #refollow-widget .rf-btn.ghost:hover { background: #e8f5fd; }
+    #xfollowback-panel .rf-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+    #xfollowback-panel .rf-head span { color: #536471; font-size: 12px; }
+    #xfollowback-panel .rf-status { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    #xfollowback-panel .rf-status .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+    #xfollowback-panel .rf-nums { margin-bottom: 8px; }
+    #xfollowback-panel .rf-nums b { font-size: 16px; }
+    #xfollowback-panel .rf-alert { background: #fdecec; color: #b02a37; border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
+    #xfollowback-panel .rf-err { color: #b02a37; font-size: 12px; margin-bottom: 8px; word-break: break-all; }
+    #xfollowback-panel .rf-btns { display: flex; gap: 8px; margin-bottom: 8px; }
+    #xfollowback-panel .rf-guide { background: #e8f5fd; color: #0b5ed7; border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
+    #xfollowback-panel .rf-msg { background: #e8f5fd; color: #0b5ed7; border-radius: 8px; padding: 6px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
+    #xfollowback-panel .rf-keep { color: #b45309; font-size: 12px; background: #fff7ed; border-radius: 8px; padding: 6px 10px; }
+    #xfollowback-widget .rf-btn { padding: 7px 20px; border-radius: 9999px; font-weight: 700; font-size: 13px; cursor: pointer; border: none; }
+    #xfollowback-widget .rf-btn.primary { background: #1d9bf0; color: #fff; }
+    #xfollowback-widget .rf-btn.primary:hover { background: #1a8cd8; }
+    #xfollowback-widget .rf-btn.warn { background: #dc2626; color: #fff; }
+    #xfollowback-widget .rf-btn.warn:hover { background: #b91c1c; }
+    #xfollowback-widget .rf-btn.ghost { background: #fff; color: #1d9bf0; border: 1px solid #1d9bf0; font-weight: 400; }
+    #xfollowback-widget .rf-btn.ghost:hover { background: #e8f5fd; }
   `;
   const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
@@ -718,7 +718,7 @@
     if (sig === widget.dataset.sig) return; // 内容没变跳过重渲染, 避免打断点击
     widget.dataset.sig = sig;
 
-    const pill = widget.querySelector('#refollow-pill');
+    const pill = widget.querySelector('#xfollowback-pill');
     if (st.alert) {
       pill.classList.add('alert');
       pill.textContent = `⚠ ${st.text} · 点击处理`;
@@ -727,7 +727,7 @@
       pill.innerHTML = `<span class="dot" style="background:${st.color}"></span>待回关 ${pending}`;
     }
 
-    const panel = widget.querySelector('#refollow-panel');
+    const panel = widget.querySelector('#xfollowback-panel');
     const pauseHint = t.state === 'paused' && t.nextAutoResumeAt
       ? ' · ' + Math.max(0, Math.round((t.nextAutoResumeAt - Date.now()) / 60000)) + '分钟后自动恢复' : '';
     const fetchInfo = cachedFetchProgress ? ` · 第${cachedFetchProgress.page}页/累计${cachedFetchProgress.users}人` : '';
@@ -737,7 +737,7 @@
         ? `<button class="rf-btn ${st.alert ? 'warn' : 'primary'}" data-act="resume">恢复</button>`
         : `<button class="rf-btn primary" data-act="start">开始回关</button>`;
     panel.innerHTML = `
-      <div class="rf-head"><strong>Refollow</strong><span>@${escHtml(t.screenName) || '—'}</span></div>
+      <div class="rf-head"><strong>XFollowBack</strong><span>@${escHtml(t.screenName) || '—'}</span></div>
       <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${fetchInfo}</div>
       <div class="rf-nums">总数 <b>${total}</b> · 待回关 <b>${pending}</b></div>
       ${cachedTemplateCaptured === false ? `<div class="rf-guide">首次使用: 请在下方列表中手动点一次任意用户的「回关」按钮, 插件即可学会自动回关(只需一次)</div>` : ''}
@@ -765,7 +765,7 @@
         parent = parent.parentElement;
       }
       const hr = h2.getBoundingClientRect();
-      const pill = widget.querySelector('#refollow-pill');
+      const pill = widget.querySelector('#xfollowback-pill');
       const pillH = (pill && pill.offsetHeight) || 36;
       widget.style.left = Math.round(hr.right + 12) + 'px';
       widget.style.top = Math.round(box.top + box.height / 2 - pillH / 2) + 'px';
@@ -804,10 +804,10 @@
     }
     if (!widget) {
       widget = document.createElement('div');
-      widget.id = 'refollow-widget';
-      widget.innerHTML = `<style>${WIDGET_CSS}</style><div id="refollow-pill"></div><div id="refollow-panel" style="display:none"></div>`;
+      widget.id = 'xfollowback-widget';
+      widget.innerHTML = `<style>${WIDGET_CSS}</style><div id="xfollowback-pill"></div><div id="xfollowback-panel" style="display:none"></div>`;
       widget.addEventListener('click', (ev) => {
-        const panel = widget.querySelector('#refollow-panel');
+        const panel = widget.querySelector('#xfollowback-panel');
         const act = ev.target && ev.target.dataset && ev.target.dataset.act;
         if (act) {
           ev.preventDefault(); ev.stopPropagation();
@@ -818,7 +818,7 @@
           else if (act === 'resume') resumeTask(handle).then(() => setPanelMsg('已恢复'));
           return;
         }
-        if (ev.target.closest('#refollow-pill')) {
+        if (ev.target.closest('#xfollowback-pill')) {
           panelOpen = !panelOpen;
           panel.style.display = panelOpen ? 'block' : 'none';
           renderWidget();
