@@ -24,6 +24,7 @@
   const K = RFg.KEY;
   const OP_FOLLOWERS = 'BlueVerifiedFollowers'; // 认证粉丝列表(GraphQL)
   const FOLLOW_API = '/i/api/1.1/friendships/create.json'; // 回关动作: v1.1 REST, 非 GraphQL(实测确认)
+
   const RESERVED_HANDLES = new Set(['i', 'home', 'explore', 'notifications', 'messages', 'settings', 'search']);
 
   // ---------- 生命周期守卫 ----------
@@ -373,6 +374,14 @@
     if (runningHandle) {
       return { ok: false, message: `任务已在运行(@${runningHandle}), 一个标签页同一时间只跑一个账号` };
     }
+    // 首次使用守卫: 回关模板未捕获时关注必然失败 → 引导先完成一次手动回关
+    // (拉取不受影响, 打开页面后观察器会自动补拉)
+    try {
+      const cap = await callPage('list-captured', {});
+      if (!(cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API)) {
+        return { ok: false, message: '首次使用: 请先在认证粉丝列表里点一次任意用户的「回关」按钮, 再点开始回关' };
+      }
+    } catch {}
     const t = await getTask(screenName);
     const pendingCount = t.queue.filter((q) => q.status === 'pending').length;
     t.state = 'running';
@@ -616,6 +625,14 @@
   let panelOpen = false;
   let panelMsg = null; // 操作反馈行(几秒后自动消失)
   let panelMsgTimer = null;
+  let cachedTemplateCaptured = null; // 回关模板是否已捕获(null=未知)
+  let tplTick = 0;
+  function setPanelMsg(text) {
+    panelMsg = text;
+    clearTimeout(panelMsgTimer);
+    panelMsgTimer = setTimeout(() => { panelMsg = null; renderWidget(); }, 5000);
+    renderWidget();
+  }
   let cachedTask = null;
   let cachedFetchProgress = null;
 
@@ -642,6 +659,7 @@
     #refollow-panel .rf-alert { background: #fdecec; color: #b02a37; border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
     #refollow-panel .rf-err { color: #b02a37; font-size: 12px; margin-bottom: 8px; word-break: break-all; }
     #refollow-panel .rf-btns { display: flex; gap: 8px; margin-bottom: 8px; }
+    #refollow-panel .rf-guide { background: #e8f5fd; color: #0b5ed7; border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
     #refollow-panel .rf-msg { background: #e8f5fd; color: #0b5ed7; border-radius: 8px; padding: 6px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
     #refollow-panel .rf-keep { color: #b45309; font-size: 12px; background: #fff7ed; border-radius: 8px; padding: 6px 10px; }
     #refollow-widget .rf-btn { padding: 7px 20px; border-radius: 9999px; font-weight: 700; font-size: 13px; cursor: pointer; border: none; }
@@ -689,7 +707,7 @@
     const total = q.length;
     const pending = q.filter((i) => i.status === 'pending').length;
     const st = currentState(t);
-    const sig = [t.state, t.pauseReason, t.nextAutoResumeAt, total, pending, st.text, panelOpen, panelMsg,
+    const sig = [t.state, t.pauseReason, t.nextAutoResumeAt, total, pending, st.text, panelOpen, panelMsg, cachedTemplateCaptured,
       cachedFetchProgress ? cachedFetchProgress.page : 0, t.lastError, t.screenName].join('|');
     if (sig === widget.dataset.sig) return; // 内容没变跳过重渲染, 避免打断点击
     widget.dataset.sig = sig;
@@ -716,6 +734,7 @@
       <div class="rf-head"><strong>Refollow</strong><span>@${escHtml(t.screenName) || '—'}</span></div>
       <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${fetchInfo}</div>
       <div class="rf-nums">总数 <b>${total}</b> · 待回关 <b>${pending}</b></div>
+      ${cachedTemplateCaptured === false ? `<div class="rf-guide">首次使用: 请在下方列表中手动点一次任意用户的「回关」按钮, 插件即可学会自动回关(只需一次)</div>` : ''}
       ${st.alert ? `<div class="rf-alert">回关模板已过期——请在本列表点一次 X 的「回关」按钮, 再点「恢复」</div>` : ''}
       ${panelMsg ? `<div class="rf-msg">${escHtml(panelMsg)}</div>` : ''}
       ${t.lastError ? `<div class="rf-err">最近错误: ${escHtml(t.lastError).slice(0, 160)}</div>` : ''}
@@ -766,6 +785,17 @@
       if (widget) { widget.remove(); widget = null; }
       return;
     }
+    // 每5秒检查一次回关模板捕获状态(捕获发生在 MAIN world 内存, storage 变化感知不到)
+    if (++tplTick % 5 === 1 || cachedTemplateCaptured == null) {
+      callPage('list-captured', {}).then((cap) => {
+        const v = !!(cap && (cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API));
+        if (v !== cachedTemplateCaptured) {
+          cachedTemplateCaptured = v;
+          if (v && panelOpen) setPanelMsg('✓ 模板已捕获, 可以点「开始回关」了');
+          renderWidget();
+        }
+      }).catch(() => {});
+    }
     if (!widget) {
       widget = document.createElement('div');
       widget.id = 'refollow-widget';
@@ -773,19 +803,13 @@
       widget.addEventListener('click', (ev) => {
         const panel = widget.querySelector('#refollow-panel');
         const act = ev.target && ev.target.dataset && ev.target.dataset.act;
-        const setMsg = (text) => {
-          panelMsg = text;
-          clearTimeout(panelMsgTimer);
-          panelMsgTimer = setTimeout(() => { panelMsg = null; renderWidget(); }, 4000);
-          renderWidget();
-        };
         if (act) {
           ev.preventDefault(); ev.stopPropagation();
           const handle = curHandle();
-          if (act === 'start') startTask(handle).then((r) => setMsg(r.message || '已启动'));
-          else if (act === 'refresh') requestRefresh().then((r) => setMsg(r.message || String(r.ok)));
-          else if (act === 'pause') pauseTask(handle, 'manual').then(() => setMsg('已暂停'));
-          else if (act === 'resume') resumeTask(handle).then(() => setMsg('已恢复'));
+          if (act === 'start') startTask(handle).then((r) => setPanelMsg(r.message || '已启动'));
+          else if (act === 'refresh') requestRefresh().then((r) => setPanelMsg(r.message || String(r.ok)));
+          else if (act === 'pause') pauseTask(handle, 'manual').then(() => setPanelMsg('已暂停'));
+          else if (act === 'resume') resumeTask(handle).then(() => setPanelMsg('已恢复'));
           return;
         }
         if (ev.target.closest('#refollow-pill')) {

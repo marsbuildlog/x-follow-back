@@ -54,6 +54,24 @@
 
   $('open').onclick = () => chrome.runtime.openOptionsPage();
 
+  // 使用说明(博客项目页)
+  $('guide').onclick = () => chrome.tabs.create({ url: 'https://marsbuildlog.github.io/refollow/' });
+
+  // 用户名 → 拼接并打开认证粉丝页(新用户只需填自己的用户名)
+  const openFollowPage = () => {
+    const name = ($('quick-handle').value || '').trim().replace(/^@/, '');
+    if (!/^[A-Za-z0-9_]{1,15}$/.test(name)) {
+      $('quick-handle').style.borderColor = '#dc2626';
+      return;
+    }
+    chrome.tabs.create({ url: `https://x.com/${name}/verified_followers` });
+  };
+  $('btn-open-vf').onclick = openFollowPage;
+  $('quick-handle').addEventListener('keydown', (e) => { if (e.key === 'Enter') openFollowPage(); });
+  $('quick-handle').addEventListener('input', () => { $('quick-handle').style.borderColor = '#cbd3d9'; });
+  // 预填最近活跃账号
+  chrome.storage.local.get('rf_active').then(({ rf_active: h }) => { if (h) $('quick-handle').value = h; });
+
   // 开发模式(本地目录导入, manifest 无 update_url)才显示重载按钮
   const isDev = !chrome.runtime.getManifest().update_url;
   const reloadBtn = $('reload');

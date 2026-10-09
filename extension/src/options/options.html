@@ -35,8 +35,13 @@
   </style>
 </head>
 <body>
-  <h1>Refollow 控制台</h1>
-  <div id="tab-warn">未检测到打开的 x.com 标签页——请先打开 https://x.com 并登录。</div>
+  <h1>Refollow 控制台 <a href="https://marsbuildlog.github.io/refollow/" target="_blank" class="hint" style="font-size:13px;font-weight:400">使用说明 ↗</a></h1>
+  <div id="tab-warn">未检测到打开的 x.com 标签页——输入你的用户名打开认证粉丝页, 或手动打开 https://x.com 并登录。
+    <div class="row" style="margin-top:8px">
+      <input id="quick-handle" placeholder="你的X用户名(不带@)" style="padding:6px 10px;border:1px solid #cbd3d9;border-radius:8px;font-size:13px;" />
+      <button id="btn-quick-open">打开认证粉丝页</button>
+    </div>
+  </div>
 
   <h2>任务</h2>
   <section><span id="task-state" class="hint"></span></section>

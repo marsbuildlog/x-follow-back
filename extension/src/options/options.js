@@ -139,6 +139,18 @@
     };
   });
 
+  // ---------- 无 x.com 标签页时: 用户名 → 打开认证粉丝页 ----------
+  const openFollowPage = () => {
+    const input = $('quick-handle');
+    const name = (input.value || '').trim().replace(/^@/, '');
+    if (!/^[A-Za-z0-9_]{1,15}$/.test(name)) { input.style.borderColor = '#dc2626'; return; }
+    chrome.tabs.create({ url: `https://x.com/${name}/verified_followers` });
+  };
+  $('btn-quick-open').onclick = openFollowPage;
+  $('quick-handle').addEventListener('keydown', (e) => { if (e.key === 'Enter') openFollowPage(); });
+  $('quick-handle').addEventListener('input', (e) => { e.target.style.borderColor = '#cbd3d9'; });
+  chrome.storage.local.get('rf_active').then(({ rf_active: h }) => { if (h) $('quick-handle').value = h; });
+
   // ---------- 初始化 ----------
   loadSettings().then(render);
   setInterval(render, 5000);
