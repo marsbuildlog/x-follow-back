@@ -198,11 +198,6 @@
       if (!(await isLockMine())) return false;
     }
   }
-  function nextMidnight() {
-    const d = new Date();
-    d.setHours(24, 5, 0, 0);
-    return d.getTime();
-  }
 
   // 回关: 重放页面自己的 v1.1 REST 请求(friendships/create.json), 仅替换 user_id
   async function followUser(userId) {
@@ -333,7 +328,7 @@
   // 自动暂停时发系统通知(带系统声音), 避免用户以为还在正常跑
   const PAUSE_ALERTS = {
     'template-expired': '回关模板已过期: 请在认证粉丝列表点一次「回关」, 然后点「恢复」',
-    'daily-limit': '今日关注已超过上限, 明天 00:05 自动恢复',
+    'daily-limit': '关注数已达上限(X 按 24 小时滚动窗口重置), 每小时自动探测重试',
     'stalled': '连续失败超过阈值, 稍后自动恢复',
     'error': '连续请求异常, 稍后自动恢复',
   };
@@ -505,10 +500,12 @@
           current.error = r.errorText;
           task.lastError = `${atName(current)}: ${r.errorText}`;
           if (r.followLimited) {
-            // 161: 今日关注已超过上限(实测包在 HTTP 403 里返回) → 当日额度用完, 暂停至次日
+            // 161: 关注数已达上限(实测包在 HTTP 403 里返回)。X 按 24h 滚动窗口重置, 与本地 0 点无关,
+            // 固定等到次日 0 点会白等十几小时 → 定时探测: 每 dailyLimitRetryMin 分钟恢复试一次,
+            // 成功即续跑, 仍 161 则再等一轮。重试时该项标 failed 后由 resumeTask 重新入队, 不会丢人。
             await saveTask(handle, task);
-            await log('今日关注已超过上限: 暂停至明日 00:05 自动恢复');
-            await pauseTask(handle, 'daily-limit', nextMidnight());
+            await log(`关注数已达上限: ${settings.dailyLimitRetryMin}分钟后自动探测重试(直到额度恢复)`);
+            await pauseTask(handle, 'daily-limit', Date.now() + settings.dailyLimitRetryMin * 60_000);
           } else if (res.status === 403) {
             // 403 且非 161: 大概率回关模板过期 → 立即暂停 + 系统通知, 不空转烧请求
             await saveTask(handle, task);

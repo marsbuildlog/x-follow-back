@@ -53,10 +53,10 @@ x.com 标签页
         已关注过滤: 只信列表自带 relationship_perspectives.following
       回关循环(消费者): 只消费 pending, 随机间隔3~8s 逐个关注
         失败处理: 429/88→不标失败, 按 reset 精确等待后重试同一人(连续3次才跳过); remaining=0→主动等重置不吃429
-                  403+161→今日上限暂停至次日+通知; 纯403→立即暂停(template-expired)+通知
+                  403+161→关注上限暂停+每小时探测重试+通知; 纯403→立即暂停(template-expired)+通知
                   请求层连续异常2次→暂停(error)+通知; 连续失败30min→暂停(stalled)+通知
         队列空→done(等待新粉); 拉取器写入新 pending 后自动续跑
-        暂停恢复: 手动恢复随时; stalled/error 到点自动尝试; 所有自动暂停发 Chrome 系统通知(带声音)
+        暂停恢复: 手动恢复随时; daily-limit/stalled/error 到点自动尝试; 所有自动暂停发 Chrome 系统通知(带声音)
       状态条: verified_followers 页顶部注入(总数/待回关/今日数/操作按钮)
       数据按账号分键: rf_task:{handle}, rf_daily:{handle}; 换账号互不干扰
 options 控制台: 队列表(含失败原始出错信息)/设置/日志/PoC面板

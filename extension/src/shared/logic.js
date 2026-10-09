@@ -95,7 +95,7 @@
       if (Array.isArray(errs403) && errs403.length) {
         if (errs403.some((e) => e.code === 161)) {
           out.followLimited = true;
-          out.errorText = '今日关注已超过上限(161), 明日 00:05 自动恢复';
+          out.errorText = '今日关注已超过上限(161), 每小时自动探测重试';
           return out;
         }
         out.errorText = errs403.map((e) => `${e.code} ${e.message}`).join('; ').slice(0, 200);

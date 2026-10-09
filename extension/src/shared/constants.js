@@ -15,6 +15,7 @@ const RF = {
     intervalMax: 8,       // 关注间隔随机区间上限(秒)
     stallMin: 30,         // 持续失败多少分钟判定为限流并暂停
     autoResumeMin: 60,    // 暂停后每隔多少分钟自动尝试恢复
+    dailyLimitRetryMin: 60, // 关注上限(161)后每隔多少分钟自动探测重试(X 按 24h 滚动窗口重置, 与本地 0 点无关)
     rateLimitBackoffMin: 15, // 命中 429/88 时的单次长退避(分钟)
     autoFetchMin: 30,     // 自动拉取认证粉丝间隔(分钟, 手动拉取后重新计时)
   },
