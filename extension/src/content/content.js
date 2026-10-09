@@ -306,20 +306,14 @@
     }
   }
 
-  // 「更新列表」请求: 运行中由主循环消费, 空闲/暂停由观察器消费(统一走拉取器)
+  // 「更新列表」: 立即触发拉取器(拉取与回关解耦, 运行中也可直接拉, 纯追加合并不冲突)
   async function requestRefresh() {
     const handle = curHandle();
     if (!handle) return { ok: false, message: '请在目标账号的 verified_followers 页面上操作' };
-    await store.set(K.refreshRequest, { screenName: handle, ts: Date.now() });
-    await log(`已请求更新认证粉丝列表(@${handle})`);
-    return { ok: true, message: '已请求更新列表, 几秒内自动执行, 结果看日志' };
-  }
-  async function processRefreshRequest() {
-    const req = await store.get(K.refreshRequest, null);
-    if (!req) return false;
-    await store.set(K.refreshRequest, null); // 先清标记防重复执行
-    if (!fetchingFollowers) runFetch(req.screenName);
-    return true;
+    if (fetchingFollowers) return { ok: false, message: '已在拉取中, 请等本轮完成' };
+    await log(`手动更新认证粉丝列表(@${handle})`);
+    runFetch(handle); // fire and forget, 进度见状态行"拉取中"
+    return { ok: true, message: '已开始更新列表' };
   }
 
   // ============================================================
@@ -525,7 +519,6 @@
   async function autoTick() {
     const handle = curHandle();
     if (handle) setActive(handle);
-    await processRefreshRequest(); // 消费「更新列表」请求(运行中由主循环处理, 这里管空闲/暂停态)
     if (!handle) return;
     if (fetchingFollowers) return;
 
@@ -621,6 +614,8 @@
   // 不占页面流、不遮挡内容; pill 常显核心数字, 需要用户操作时变红脉动
   let widget = null;
   let panelOpen = false;
+  let panelMsg = null; // 操作反馈行(几秒后自动消失)
+  let panelMsgTimer = null;
   let cachedTask = null;
   let cachedFetchProgress = null;
 
@@ -646,6 +641,7 @@
     #refollow-panel .rf-alert { background: #fdecec; color: #b02a37; border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
     #refollow-panel .rf-err { color: #b02a37; font-size: 12px; margin-bottom: 8px; word-break: break-all; }
     #refollow-panel .rf-btns { display: flex; gap: 8px; margin-bottom: 8px; }
+    #refollow-panel .rf-msg { background: #e8f5fd; color: #0b5ed7; border-radius: 8px; padding: 6px 10px; font-size: 12px; margin-bottom: 8px; font-weight: 700; }
     #refollow-panel .rf-keep { color: #b45309; font-size: 12px; background: #fff7ed; border-radius: 8px; padding: 6px 10px; }
     #refollow-widget .rf-btn { padding: 7px 20px; border-radius: 9999px; font-weight: 700; font-size: 13px; cursor: pointer; border: none; }
     #refollow-widget .rf-btn.primary { background: #1d9bf0; color: #fff; }
@@ -692,7 +688,7 @@
     const total = q.length;
     const pending = q.filter((i) => i.status === 'pending').length;
     const st = currentState(t);
-    const sig = [t.state, t.pauseReason, t.nextAutoResumeAt, total, pending, st.text, panelOpen,
+    const sig = [t.state, t.pauseReason, t.nextAutoResumeAt, total, pending, st.text, panelOpen, panelMsg,
       cachedFetchProgress ? cachedFetchProgress.page : 0, t.lastError, t.screenName].join('|');
     if (sig === widget.dataset.sig) return; // 内容没变跳过重渲染, 避免打断点击
     widget.dataset.sig = sig;
@@ -720,6 +716,7 @@
       <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${fetchInfo}</div>
       <div class="rf-nums">总数 <b>${total}</b> · 待回关 <b>${pending}</b></div>
       ${st.alert ? `<div class="rf-alert">回关模板已过期——请在本列表点一次 X 的「回关」按钮, 再点「恢复」</div>` : ''}
+      ${panelMsg ? `<div class="rf-msg">${escHtml(panelMsg)}</div>` : ''}
       ${t.lastError ? `<div class="rf-err">最近错误: ${escHtml(t.lastError).slice(0, 160)}</div>` : ''}
       <div class="rf-btns">${actionBtn}<button class="rf-btn ghost" data-act="refresh">更新列表</button></div>
       <div class="rf-keep">⏳ 任务在此页面内运行, 请保持标签页开启——关闭后会暂停, 重新打开会自动继续</div>
@@ -755,13 +752,19 @@
       widget.addEventListener('click', (ev) => {
         const panel = widget.querySelector('#refollow-panel');
         const act = ev.target && ev.target.dataset && ev.target.dataset.act;
+        const setMsg = (text) => {
+          panelMsg = text;
+          clearTimeout(panelMsgTimer);
+          panelMsgTimer = setTimeout(() => { panelMsg = null; renderWidget(); }, 4000);
+          renderWidget();
+        };
         if (act) {
           ev.preventDefault(); ev.stopPropagation();
           const handle = curHandle();
-          if (act === 'start') startTask(handle);
-          else if (act === 'refresh') requestRefresh();
-          else if (act === 'pause') pauseTask(handle, 'manual');
-          else if (act === 'resume') resumeTask(handle);
+          if (act === 'start') startTask(handle).then((r) => setMsg(r.message || '已启动'));
+          else if (act === 'refresh') requestRefresh().then((r) => setMsg(r.message || String(r.ok)));
+          else if (act === 'pause') pauseTask(handle, 'manual').then(() => setMsg('已暂停'));
+          else if (act === 'resume') resumeTask(handle).then(() => setMsg('已恢复'));
           return;
         }
         if (ev.target.closest('#refollow-pill')) {
