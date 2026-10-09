@@ -69,6 +69,7 @@
     $('s-intervalMax').value = v.intervalMax;
     $('s-stallMin').value = v.stallMin;
     $('s-autoResumeMin').value = v.autoResumeMin;
+    $('s-rateLimitBackoffMin').value = v.rateLimitBackoffMin;
   }
   async function saveSettings() {
     await chrome.storage.local.set({
@@ -78,6 +79,7 @@
         intervalMax: +$('s-intervalMax').value || RF.DEFAULTS.intervalMax,
         stallMin: +$('s-stallMin').value || RF.DEFAULTS.stallMin,
         autoResumeMin: +$('s-autoResumeMin').value || RF.DEFAULTS.autoResumeMin,
+        rateLimitBackoffMin: +$('s-rateLimitBackoffMin').value || RF.DEFAULTS.rateLimitBackoffMin,
       },
     });
     raw('设置已保存', null);
