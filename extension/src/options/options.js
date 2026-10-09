@@ -26,16 +26,17 @@
     targetTabId = tab ? tab.id : null;
     $('tab-warn').style.display = tab ? 'none' : 'block';
 
-    // 任务状态
+    // 任务状态(按账号分键, 通过 content script 的 activeHandle 定位)
     const task = targetTabId != null ? await send('get-task') : null;
     if (task && task.state) {
       const q = task.queue || [];
       const counts = {};
       for (const i of q) counts[i.status] = (counts[i.status] || 0) + 1;
+      const daily = (task.daily && task.daily.followed) || 0;
       $('task-state').textContent =
-        `状态: ${task.state}${task.pauseReason ? '(' + task.pauseReason + ')' : ''}` +
-        ` · 队列: 待回关 ${counts.pending || 0} / 已回关 ${counts.done || 0} / 失败 ${counts.failed || 0} / 跳过 ${counts.skipped || 0}` +
-        (task.screenName ? ` · 账号: @${task.screenName}` : '');
+        `账号: @${task.screenName || '?'} · 状态: ${task.state === 'done' ? '等待新粉' : task.state}${task.pauseReason ? '(' + task.pauseReason + ')' : ''}` +
+        ` · 总数: ${q.length} · 待回关: ${counts.pending || 0} · 今日已回关: ${daily}` +
+        (task.lastFetchAt ? ` · 上次拉取: ${new Date(task.lastFetchAt).toLocaleTimeString()}` : '');
       const tbody = $('queue-table').querySelector('tbody');
       tbody.innerHTML = q
         .filter((i) => i.status !== 'skipped')
@@ -69,6 +70,7 @@
     $('s-stallMin').value = v.stallMin;
     $('s-autoResumeMin').value = v.autoResumeMin;
     $('s-rateLimitBackoffMin').value = v.rateLimitBackoffMin;
+    $('s-autoFetchMin').value = v.autoFetchMin;
   }
   async function saveSettings() {
     await chrome.storage.local.set({
@@ -78,6 +80,7 @@
         stallMin: +$('s-stallMin').value || RF.DEFAULTS.stallMin,
         autoResumeMin: +$('s-autoResumeMin').value || RF.DEFAULTS.autoResumeMin,
         rateLimitBackoffMin: +$('s-rateLimitBackoffMin').value || RF.DEFAULTS.rateLimitBackoffMin,
+        autoFetchMin: +$('s-autoFetchMin').value || RF.DEFAULTS.autoFetchMin,
       },
     });
     raw('设置已保存', null);
@@ -102,9 +105,9 @@
     raw('已捕获接口' + (missing.length ? `(缺少: ${missing.join(', ')})` : '(PoC 关键接口齐全 ✓)'), r);
   };
   $('btn-fetch').onclick = async () => {
-    raw('拉取认证粉丝…', '进行中');
-    const r = await send('start-task', { screenName: locationSearchHandle() || undefined });
-    raw('拉取认证粉丝/启动任务', r);
+    raw('拉取认证粉丝…', '已请求, 进度看下方与日志');
+    const r = await send('refresh-list');
+    raw('拉取认证粉丝', r);
     render();
   };
   $('btn-follow-one').onclick = async () => {

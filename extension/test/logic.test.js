@@ -178,7 +178,7 @@ test('mergeUsers: 新人追加, 已关注标 skipped', () => {
   const added = mergeUsers(t, [
     { userId: '1', following: false, screenName: 'a', name: 'A' },
     { userId: '2', following: true, screenName: 'b', name: 'B' },
-  ], null);
+  ]);
   assert.equal(added, 2);
   assert.equal(t.queue[0].status, 'pending');
   assert.equal(t.queue[1].status, 'skipped');
@@ -186,24 +186,17 @@ test('mergeUsers: 新人追加, 已关注标 skipped', () => {
 
 test('mergeUsers: 按 userId 去重, 已有状态不受影响', () => {
   const t = makeTask([{ userId: '1', status: 'done', screenName: 'a', name: 'A', error: null }]);
-  const added = mergeUsers(t, [{ userId: '1', following: false, screenName: 'a', name: 'A' }], null);
+  const added = mergeUsers(t, [{ userId: '1', following: false, screenName: 'a', name: 'A' }]);
   assert.equal(added, 0);
   assert.equal(t.queue.length, 1);
   assert.equal(t.queue[0].status, 'done'); // 状态未被覆盖
 });
 
-test('mergeUsers: followedIds 交集把 pending 补标为 skipped(含队列里已有项)', () => {
-  const t = makeTask([{ userId: '9', status: 'pending', screenName: 'z', name: 'Z', error: null }]);
-  mergeUsers(t, [{ userId: '8', following: false, screenName: 'y', name: 'Y' }], new Set(['8', '9']));
-  assert.equal(t.queue.find((q) => q.userId === '8').status, 'skipped');
-  assert.equal(t.queue.find((q) => q.userId === '9').status, 'skipped');
-});
-
 test('mergeUsers: 幂等——同一批用户合并两次不产生重复', () => {
   const t = makeTask([]);
   const users = [{ userId: '1', following: false, screenName: 'a', name: 'A' }];
-  mergeUsers(t, users, null);
-  mergeUsers(t, users, null);
+  mergeUsers(t, users);
+  mergeUsers(t, users);
   assert.equal(t.queue.length, 1);
 });
 
@@ -263,7 +256,7 @@ test('buildApiRequest: form body 仅替换 user_id 并移除 screen_name 冲突'
 test('buildApiRequest: GET 请求替换查询参数', () => {
   const entry = {
     method: 'GET',
-    url: 'https://x.com/i/api/1.1/friends/following/list.json',
+    url: 'https://x.com/i/api/1.1/friendships/show.json',
     search: '?cursor=-1&count=20',
     body: null,
     headers: {},

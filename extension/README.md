@@ -34,6 +34,8 @@ npm test        # 仓库根目录运行, 跑核心逻辑单元测试(node ≥ 18
 
 ## 工作原理
 
+生产者/消费者架构: 拉取器与回关循环解耦, 队列是唯一交界面。
+
 ```
 x.com 标签页
 ├── page-hook.js   (MAIN world, 先于页面脚本)
@@ -45,12 +47,17 @@ x.com 标签页
 └── content.js     (隔离世界, 入口唯一文件)
       启动时 await import() 显式加载 shared/constants.js 与 shared/logic.js 并校验挂载
       (⚠ 不用 manifest 多文件列表保证顺序: Chrome 的多文件注入顺序不可靠, 出过 logic.js 未执行的确定性 bug)
-      任务执行器: 拉粉丝→过滤已关注→逐个关注(随机间隔30~90s)
-      失败处理: 429/88→按 x-rate-limit-reset 精确等待窗口重置(无头时固定退避); remaining=0→主动等重置不吃429
-                  161→暂停至次日; 连续失败30min→暂停
-      暂停恢复: 手动恢复; 未恢复则每小时自动尝试
-      状态条: verified_followers 页顶部注入(进度/今日数/操作按钮)
-      状态持久化: chrome.storage.local, 刷新/重开浏览器可恢复
+      拉取器(生产者): 翻页拉认证粉丝(100/页, 上限500页) → 纯追加合并进队列(不碰已有条目)
+        触发: 手动「更新列表」/ 打开页面且距上次拉取超过 autoFetchMin(默认30分钟)
+        429 自行退避重试(同一页最多3次), 不影响回关循环
+        已关注过滤: 只信列表自带 relationship_perspectives.following
+      回关循环(消费者): 只消费 pending, 随机间隔15~30s 逐个关注
+        失败处理: 429/88→按 x-rate-limit-reset 精确等待窗口重置; remaining=0→主动等重置不吃429
+                    161→暂停至次日; 连续失败30min→暂停
+        队列空→done(等待新粉); 拉取器写入新 pending 后自动续跑
+        暂停恢复: 手动恢复; 未恢复则到点自动尝试
+      状态条: verified_followers 页顶部注入(总数/待回关/今日数/操作按钮)
+      数据按账号分键: rf_task:{handle}, rf_daily:{handle}; 换账号互不干扰
 options 控制台: 队列表(含失败原始出错信息)/设置/日志/PoC面板
 ```
 
@@ -58,15 +65,16 @@ options 控制台: 队列表(含失败原始出错信息)/设置/日志/PoC面�
 
 ## 存储
 
-全部在 `chrome.storage.local`:
+全部在 `chrome.storage.local`, 任务/今日数按账号分键:
 
 | key | 内容 |
 |-----|------|
-| `rf_settings` | 间隔/退避等设置 |
-| `rf_daily` | `{date, followed}` 今日已关注数 |
-| `rf_task` | 任务状态机 + 回关队列(每人状态与出错信息) |
+| `rf_task:{handle}` | 该账号的任务状态机 + 回关队列(每人状态/出错信息/完成时间) + lastFetchAt |
+| `rf_daily:{handle}` | `{date, followed}` 该账号今日已关注数 |
+| `rf_active` | 最近活跃账号(options/popup 无页面上下文时定位任务) |
+| `rf_settings` | 间隔/退避/自动拉取间隔等设置(全局) |
 | `rf_lock` | 多标签页领导权锁 |
-| `rf_log` | 运行日志(200条) |
+| `rf_log` | 运行日志(200条, 全局) |
 
 ## 备选方案(若重放被 x-client-transaction-id 拦截)
 

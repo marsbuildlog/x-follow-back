@@ -125,25 +125,19 @@
     return 0;
   }
 
-  // 队列合并: 新人追加(已关注标 skipped), 已关注的 pending 补标 skipped; 返回新增数。
+  // 队列合并: 新人追加, 已关注(u.following, 来自列表自带 relationship_perspectives.following)标 skipped; 返回新增数。
   // 幂等: 队列里已有的 userId 不会重复添加, 已有状态不受影响。
-  function mergeUsers(t, users, followedIds) {
+  function mergeUsers(t, users) {
     const existing = new Set(t.queue.map((q) => q.userId));
     let added = 0;
     for (const u of users) {
-      const isFollowed = u.following || (followedIds ? followedIds.has(u.userId) : false);
       if (existing.has(u.userId)) continue;
       t.queue.push({
         userId: u.userId, screenName: u.screenName, name: u.name,
-        status: isFollowed ? 'skipped' : 'pending', // 已关注直接跳过
+        status: u.following ? 'skipped' : 'pending', // 已关注直接跳过
         error: null,
       });
       added++;
-    }
-    if (followedIds) {
-      for (const q of t.queue) {
-        if (q.status === 'pending' && followedIds.has(q.userId)) q.status = 'skipped';
-      }
     }
     return added;
   }

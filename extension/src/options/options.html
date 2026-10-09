@@ -68,12 +68,14 @@
     <label>连续失败暂停(分钟) <input type="number" id="s-stallMin" /></label>
     <label>暂停后自动恢复间隔(分钟) <input type="number" id="s-autoResumeMin" /></label>
     <label>429退避等待(分钟) <input type="number" id="s-rateLimitBackoffMin" /></label>
+    <label>自动拉取间隔(分钟) <input type="number" id="s-autoFetchMin" /></label>
     <button id="btn-save-settings" class="ghost">保存设置</button>
   </section>
   <div class="hint">
     连续失败暂停：非 429 的关注失败连续持续超过该时长 → 任务自动暂停（保护账号）。·
     暂停后自动恢复间隔：暂停后每隔该时长自动尝试恢复（触达 X 侧关注上限(161)的暂停到次日 0 点才恢复；手动恢复随时可用）。·
     429退避等待：命中 429 后优先按响应头 x-rate-limit-reset 精确等到窗口重置，响应头缺失时才用这个固定时长（被 429 的人标为失败不自动重试，可用「更新列表」重新入队）。另外窗口次数耗尽(remaining=0)时会主动等重置，尽量避免吃 429。·
+    自动拉取间隔：打开 verified_followers 页面时，距上次拉取(含手动「更新列表」)超过该时长则自动拉一次，新粉丝自动入队；等待新粉状态下拉到新人会自动续跑。·
     修改后点「保存设置」，下一个关注请求即生效。
   </div>
 
