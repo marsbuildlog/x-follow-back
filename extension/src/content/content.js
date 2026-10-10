@@ -454,8 +454,11 @@
       // 非 JSON 响应(空体/错误页)带上状态码, 便于定位
       if (parsed.error) {
         parsed.error = `HTTP ${res.status}: ` + parsed.error;
-        // 404 = queryId 已被 X 轮换(捕获过期); 模板永远来自页面当下请求, 刷新即恢复
-        if (res.status === 404) parsed.error += '(X 可能已轮换接口 ID——请刷新标签页重新捕获后重试)';
+        if (res.status === 404) parsed.error += '(请刷新标签页重新捕获后重试)';
+        // 失败取证: 模板信息 + 实际请求 URL(URL 不含凭证, 可安全外发), 便于与页面成功请求逐字节对比
+        const featLen = new URLSearchParams(entry.search || '').get('features')?.length || 0;
+        await log(`搜索失败取证: method=${entry.method} queryId=${entry.queryId} 捕获变量含cursor=${'cursor' in (entry.variables || {})} 发送cursor=${cursor ? '有' : '无'} features长度=${featLen}`);
+        if (res.url) await log(`失败URL: ${res.url}`);
       }
       return parsed;
     }

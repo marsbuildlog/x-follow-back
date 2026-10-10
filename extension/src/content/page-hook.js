@@ -83,8 +83,13 @@
         const queryId = parts[3];
         const operationName = parts[4];
         let variables = null;
+        let features = null; // POST 形态的 GraphQL, features 在 body 里(重放时必须带回, 缺了会 404/400)
         if (method === 'POST') {
-          try { variables = typeof init.body === 'string' ? JSON.parse(init.body).variables ?? null : null; } catch {}
+          try {
+            const bodyObj = typeof init.body === 'string' ? JSON.parse(init.body) : null;
+            variables = bodyObj?.variables ?? null;
+            features = bodyObj?.features ?? null;
+          } catch {}
         } else {
           const p = new URLSearchParams(u.search);
           if (p.get('variables')) { try { variables = JSON.parse(p.get('variables')); } catch {} }
@@ -93,7 +98,7 @@
           type: 'graphql', operationName, queryId, method,
           url: u.origin + u.pathname,
           search: u.search,
-          variables, headers, capturedAt: ts,
+          variables, features, headers, capturedAt: ts,
         });
         history.push({ operationName, queryId, method, ts });
         if (history.length > MAX_HISTORY) history.shift();
@@ -233,11 +238,13 @@
           url += '?' + p.toString();
         } else {
           init.headers['content-type'] = 'application/json';
-          init.body = JSON.stringify({ variables: variables || {}, queryId: entry.queryId });
+          const bodyObj = { variables: variables || {}, queryId: entry.queryId };
+          if (entry.features) bodyObj.features = entry.features; // POST 形态必须带回 features
+          init.body = JSON.stringify(bodyObj);
         }
         const res = await origFetch.call(window, url, init);
         const body = await res.text();
-        reply({ status: res.status, ok: res.ok, body, rl: rateLimitHeaders(res) });
+        reply({ status: res.status, ok: res.ok, body, rl: rateLimitHeaders(res), url });
       } catch (e) {
         reply({ status: -1, ok: false, body: String(e) });
       }
