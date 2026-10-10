@@ -107,48 +107,79 @@ chrome.webRequest.onSendHeaders.addListener(
   ['requestHeaders']
 );
 
-// graphql 模板旁听(Route 1 运输材料): op → {path, queryId, method, features, 首见变量形状, GET原search, 页面原头筛后}。
-// X 轮换 queryId 时自动续鲜; 变量逐请求都变, 只存首见形状供参考, 不作为写入条件。
+// graphql 模板旁听(Route 1 运输材料): op → {path, queryId, method, features, 首见变量, GET稳定参数, 页面原头筛后}。
+// 教训(65a4bcc): onBeforeRequest 的 extraInfoSpec 不收 requestHeaders(只 onSendHeaders 给),
+// 写了在 SW 顶层求值时直接抛 TypeError → 整个 SW 注册失败, 后台全死。
+// 因此拆两个监听器: 头与 URL 元信息在 onSendHeaders(它才有 requestHeaders);
+// POST body 的 features 只 onBeforeRequest 拿得到, 在这里打补丁(比主体晚一发到达, SearchTimeline 连发几秒内补齐)。
+// 变量逐请求都变: s 存除 variables 外的稳定参数, 不参与逐请求写入。
 const TPL_PREFIX = globalThis.RF.KEY.gqlTpl + ':';
-chrome.webRequest.onBeforeRequest.addListener(
+
+// onSendHeaders: 模板主体(p/q/m/s/f(GET)/v0(GET)/h)
+chrome.webRequest.onSendHeaders.addListener(
   (details) => {
     try {
       const u = new URL(details.url);
+      if (!u.pathname.startsWith('/i/api/graphql/')) return;
       const op = u.pathname.split('/').pop();
       if (!op) return;
-      const tplKey = TPL_PREFIX + op;
       const q = u.pathname.split('/')[4] || ''; // /i/api/graphql/<queryId>/<op>
       let features = null;
       let v0 = null;
-      let search = '';
+      let sStable = '';
       if (details.method === 'GET') {
-        search = u.search; // GET 直连重放要保留 features/fieldToggles, 只换 variables
-        try { v0 = JSON.parse(u.searchParams.get('variables') || 'null'); } catch {}
-        try { features = JSON.parse(u.searchParams.get('features') || 'null'); } catch {}
-      } else {
-        const raw = details.requestBody && details.requestBody.raw && details.requestBody.raw[0];
-        if (raw && raw.bytes) {
-          try {
-            const body = JSON.parse(new TextDecoder().decode(raw.bytes));
-            features = body.features || null;
-            v0 = body.variables || null;
-          } catch {}
-        }
+        // GET 直连重放要保留 features/fieldToggles 等, 只换 variables → 存去掉 variables 后的稳定参数串
+        const sp = new URLSearchParams(u.search);
+        try { v0 = JSON.parse(sp.get('variables') || 'null'); } catch {}
+        try { features = JSON.parse(sp.get('features') || 'null'); } catch {}
+        sp.delete('variables');
+        sStable = sp.toString();
       }
       // 页面原头(Route 1 对照实验的 full 头集来源); 动态/注入项由 pickDirectHeaders 剔除
       const directHeaders = globalThis.RFRoute1.pickDirectHeaders(
         Object.fromEntries((details.requestHeaders || []).map((h) => [h.name, h.value]))
       );
+      const tplKey = TPL_PREFIX + op;
       chrome.storage.local.get(tplKey).then(({ [tplKey]: old }) => {
-        // queryId/features/头集都没变就不写(避免每次滚动都写 storage); search 含逐请求 variables 不参与比较
-        if (old && old.q === q && JSON.stringify(old.f) === JSON.stringify(features)
+        // queryId/features/头集/稳定参数都没变就不写(避免每次滚动都写 storage)
+        if (old && old.q === q && old.s === sStable
+            && JSON.stringify(old.f) === JSON.stringify(features)
             && JSON.stringify(old.h) === JSON.stringify(directHeaders)) return;
-        return chrome.storage.local.set({ [tplKey]: { p: u.pathname, q, m: details.method, f: features, v0, s: search, h: directHeaders, at: Date.now() } });
+        return chrome.storage.local.set({ [tplKey]: { p: u.pathname, q, m: details.method, f: features, v0: (old && old.v0) || v0, s: sStable, h: directHeaders, at: Date.now() } });
       }).catch(() => {});
     } catch {}
   },
   { urls: ['https://x.com/i/api/graphql/*'] },
-  ['requestBody', 'requestHeaders']
+  ['requestHeaders']
+);
+
+// onBeforeRequest: 只为 POST 形态补 features/首见变量(requestBody 只它有)
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    try {
+      if (details.method !== 'POST') return;
+      const u = new URL(details.url);
+      if (!u.pathname.startsWith('/i/api/graphql/')) return;
+      const op = u.pathname.split('/').pop();
+      const raw = details.requestBody && details.requestBody.raw && details.requestBody.raw[0];
+      if (!op || !raw || !raw.bytes) return;
+      let features = null;
+      let v0 = null;
+      try {
+        const body = JSON.parse(new TextDecoder().decode(raw.bytes));
+        features = body.features || null;
+        v0 = body.variables || null;
+      } catch {}
+      const tplKey = TPL_PREFIX + op;
+      chrome.storage.local.get(tplKey).then(({ [tplKey]: old }) => {
+        if (!old) return; // 主体还没写(onSendHeaders 稍后写), 等下一发自然补上
+        if (JSON.stringify(old.f) === JSON.stringify(features) && old.v0) return;
+        return chrome.storage.local.set({ [tplKey]: Object.assign({}, old, { f: features, v0: old.v0 || v0, at: Date.now() }) });
+      }).catch(() => {});
+    } catch {}
+  },
+  { urls: ['https://x.com/i/api/graphql/*'] },
+  ['requestBody']
 );
 
 // ---------- Route 1 直连对照实验(ADR-0004) ----------
