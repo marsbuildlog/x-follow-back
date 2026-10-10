@@ -487,6 +487,7 @@
   // tid 来源优先级(ADR-0004): 池子里同路径且冷却已过的 tid(免等待, 池子越深翻页越快)
   //   → 回退: 等捕获 tid 冷却过后用它(历史行为, 基准=捕获时刻/我们上次成功较晚者)
   let lastSearchOkAt = 0;
+  let lastSearchFireAt = 0; // 上次发射时刻(含失败): 桶节奏兼底用, 与 tid 冷却是两套独立约束
   async function searchPage(rawQuery, cursor) {
     const cap = await callPage('list-captured', {});
     const entry = (cap.operations || []).find((o) => o.operationName === OP_SEARCH);
@@ -506,6 +507,16 @@
           await sleepSegments(waitMs);
         }
       }
+      // 桶节奏兼底: SearchTimeline 限流 50次/15分钟(≈18s/发), 扫描首扫最多 100 页,
+      // 池子深时连发会烧穿桶——连带页面自己的轮询(如 ViewerBadgeCounts)也被 429。
+      // 无论 tid 来源, 两次发射至少隔 AF.SEARCH_MIN_GAP_MS; 429 仍由下方退避兼底。
+      const sinceFire = Date.now() - lastSearchFireAt;
+      if (sinceFire < AF.SEARCH_MIN_GAP_MS) {
+        const waitMs = AF.SEARCH_MIN_GAP_MS - sinceFire;
+        await log(`搜索节奏控制(限流桶50次/15分钟), 等${Math.ceil(waitMs / 1000)}秒`);
+        await sleepSegments(waitMs);
+      }
+      lastSearchFireAt = Date.now();
       const res = await callGraphQL(OP_SEARCH, variables, poolTid);
       if (res.status === 429) {
         if (++retries > 3) return { rateLimitedOut: true };
