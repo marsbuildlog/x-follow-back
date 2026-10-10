@@ -741,6 +741,9 @@
 
   // ---------- 主循环(消费者, 两队列一循环见 ADR-0001) ----------
   let loopRunning = false;
+  // 循环的静默等待期(429限流/窗口次数用完): 状态仍是 running, 但面板要标出原因与剩余时间,
+  // 否则看起来像挂掉了(2026-10-10 用户反馈)
+  let loopWait = null;
   async function runLoop(handle) {
     if (loopRunning || !handle) return;
     if (!(await acquireLock())) return;
@@ -825,8 +828,10 @@
           // 主动限流: 窗口次数耗尽时等到 reset 再发下一个, 避免吃 429
           const pw = windowExhaustedWaitMs(r, Date.now());
           if (pw > 0) {
+            loopWait = { until: Date.now() + pw, text: '窗口次数用完' };
             await log(`本窗口次数已用完(remaining=0), ${Math.round(pw / 1000)}秒后窗口重置自动继续`);
             if (!(await sleepInterruptible(pw, handle))) break;
+            loopWait = null;
           }
         } else if (r.rateLimited) {
           // B: 429/88 是环境问题不是这个人的问题 → 不标失败不进 stall,
@@ -843,8 +848,10 @@
             rateRetryUserId = null;
           } else {
             const resetTxt = r.rateReset ? ', 窗口 ' + new Date(r.rateReset * 1000).toLocaleTimeString() + ' 重置' : '';
+            loopWait = { until: Date.now() + backoff, text: '限流重试' };
             await log(`限流(${rateRetryCount}/3)${resetTxt}, ${Math.round(backoff / 1000)}秒后重试同一人 ${atName(current)}`);
             if (!(await sleepInterruptible(backoff, handle))) break;
+            loopWait = null;
           }
         } else if (r.alreadyFollowing) {
           // 160: 对方已在关注列表(或无法关注)——不是故障, 标 skipped 不进失败窗口
@@ -888,6 +895,7 @@
     } finally {
       loopRunning = false;
       runningHandle = null;
+      loopWait = null;
     }
   }
 
@@ -1087,7 +1095,7 @@
   // 主动关注状态文案(done = 队列已清空, 与回关的"等待新粉"区分)
   function afCurrentState(t) {
     if (!t) return STATE_STYLE.idle;
-    if (t.state === 'running') return (cachedAfProgress || afSearching || afScanning) ? STATE_STYLE.fetching : STATE_STYLE.running;
+    if (t.state === 'running') return (cachedAfProgress || afSearching || afScanning) ? { text: '后台任务中', color: '#7c3aed' } : STATE_STYLE.running;
     if (t.state === 'paused') return STATE_STYLE['paused:' + t.pauseReason] || { text: '已暂停', color: '#d97706' };
     if (t.state === 'done') return { text: '队列已空', color: '#16a34a' };
     return STATE_STYLE.idle;
@@ -1119,7 +1127,9 @@
     const total = q.length;
     const pending = q.filter((i) => i.status === 'pending').length;
     const st = currentState(t);
-    const sig = [t.state, t.pauseReason, t.nextAutoResumeAt, total, pending, st.text, panelOpen, panelMsg, cachedTemplateCaptured,
+    const waitMin = (at) => (at ? Math.max(0, Math.ceil((at - Date.now()) / 60000)) : 0);
+    const sig = [t.state, t.pauseReason, total, pending, st.text, panelOpen, panelMsg, cachedTemplateCaptured,
+      waitMin(t.nextAutoResumeAt), loopWait ? loopWait.text + waitMin(loopWait.until) : '',
       cachedFetchProgress ? cachedFetchProgress.page : 0, t.lastError, t.screenName].join('|');
     if (sig === widget.dataset.sig) return; // 内容没变跳过重渲染, 避免打断点击
     widget.dataset.sig = sig;
@@ -1136,6 +1146,8 @@
     const panel = widget.querySelector('#xfollowback-panel');
     const pauseHint = t.state === 'paused' && t.nextAutoResumeAt
       ? ' · ' + Math.max(0, Math.round((t.nextAutoResumeAt - Date.now()) / 60000)) + '分钟后自动恢复' : '';
+    const loopWaitHint = loopWait
+      ? ` · ${loopWait.text}, 约${Math.max(1, Math.ceil((loopWait.until - Date.now()) / 60000))}分钟后继续` : '';
     const fetchInfo = cachedFetchProgress ? ` · 第${cachedFetchProgress.page}页/累计${cachedFetchProgress.users}人` : '';
     const actionBtn = t.state === 'running'
       ? `<button class="rf-btn primary" data-act="pause">暂停</button>`
@@ -1144,7 +1156,7 @@
         : `<button class="rf-btn primary" data-act="start">开始回关</button>`;
     panel.innerHTML = `
       <div class="rf-head"><strong>XFollowBack</strong><span>@${escHtml(t.screenName) || '—'}</span></div>
-      <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${fetchInfo}</div>
+      <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${loopWaitHint}${fetchInfo}</div>
       <div class="rf-nums">总数 <b>${total}</b> · 待回关 <b>${pending}</b></div>
       ${cachedTemplateCaptured === false ? `<div class="rf-guide">首次使用: 请在下方列表中手动点一次任意用户的「回关」按钮, 插件即可学会自动回关(只需一次)</div>` : ''}
       ${st.alert ? `<div class="rf-alert">回关模板已过期——请在本列表点一次 X 的「回关」按钮, 再点「恢复」</div>` : ''}
@@ -1164,7 +1176,10 @@
     const pool = (t.tags && t.tags[tag] && t.tags[tag].posts) || [];
     const dueCount = pool.filter((p) => p.scanCount < AF.SCAN_MAX && p.nextScanAt <= Date.now()).length;
     const st = afCurrentState(t);
-    const sig = ['af', t.state, t.pauseReason, t.nextAutoResumeAt, total, pending, pool.length, dueCount, st.text,
+    // 倒计时按分钟纳入 sig: 每过一分钟触发一次重渲染, 否则"N分钟后"会冻结在首次渲染的数值
+    const waitMin = (at) => (at ? Math.max(0, Math.ceil((at - Date.now()) / 60000)) : 0);
+    const sig = ['af', t.state, t.pauseReason, total, pending, pool.length, dueCount, st.text,
+      waitMin(t.nextAutoResumeAt), loopWait ? loopWait.text + waitMin(loopWait.until) : '',
       panelOpen, panelMsg, cachedTemplateCaptured, afScanning, afSearching,
       cachedAfProgress ? cachedAfProgress.page : 0, t.lastError, t.screenName, tag].join('|');
     if (sig === widget.dataset.sig) return;
@@ -1182,6 +1197,8 @@
     const panel = widget.querySelector('#xfollowback-panel');
     const pauseHint = t.state === 'paused' && t.nextAutoResumeAt
       ? ' · ' + Math.max(0, Math.round((t.nextAutoResumeAt - Date.now()) / 60000)) + '分钟后自动恢复' : '';
+    const loopWaitHint = loopWait
+      ? ` · ${loopWait.text}, 约${Math.max(1, Math.ceil((loopWait.until - Date.now()) / 60000))}分钟后继续` : '';
     const searchInfo = cachedAfProgress ? ` · 搜索第${cachedAfProgress.page}/${cachedAfProgress.maxPages}页`
       : (afScanning ? ' · 扫描回复中' : '');
     const actionBtn = t.state === 'running'
@@ -1191,7 +1208,7 @@
         : `<button class="rf-btn primary" data-act="start">开始主动关注</button>`;
     panel.innerHTML = `
       <div class="rf-head"><strong>XFollowBack</strong><span>主动关注 #${escHtml(tag)} · @${escHtml(t.screenName) || '—'}</span></div>
-      <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${searchInfo}</div>
+      <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${loopWaitHint}${searchInfo}</div>
       <div class="rf-nums">帖子池 <b>${pool.length}</b> · 待扫描 <b>${dueCount}</b> · 队列 <b>${total}</b> · 待关注 <b>${pending}</b></div>
       ${cachedTemplateCaptured === false ? `<div class="rf-guide">首次使用: 请先在认证粉丝列表页点一次任意用户的「回关」按钮, 插件学会关注动作后回来点「开始」(只需一次)</div>` : ''}
       ${st.alert ? `<div class="rf-alert">回关模板已过期——请在认证粉丝列表页点一次「回关」刷新, 再点「恢复」</div>` : ''}
