@@ -156,8 +156,10 @@
   // 互关标签列表: 保存前的内存副本, 增删直接改它, 随保存一起落盘
   let pendingTags = [];
 
+  // 规范化: 只去 # 和首尾空格, 保留原始大小写——搜索词必须与真实 hashtag 一致(#蓝V互关 的大写 V 不能丢);
+  // 大小写去重在添加时单独处理
   function normalizeTag(t) {
-    return String(t || '').trim().replace(/^#/, '').toLowerCase();
+    return String(t || '').trim().replace(/^#/, '').trim();
   }
 
   function renderTagChips() {
@@ -179,7 +181,8 @@
     const input = $('s-tag-input');
     const t = normalizeTag(input.value);
     if (!t) return;
-    if (!pendingTags.includes(t)) pendingTags.push(t);
+    // 大小写不敏感去重: 已有同名(不同写法)的 tag 时不重复添加
+    if (!pendingTags.some((x) => x.toLowerCase() === t.toLowerCase())) pendingTags.push(t);
     input.value = '';
     renderTagChips();
   }
@@ -191,6 +194,7 @@
     $('s-intervalMax').value = v.intervalMax;
     $('s-autoFetchMin').value = v.autoFetchMin;
     pendingTags = (v.tags || []).map(normalizeTag).filter(Boolean);
+    // 存量数据兼容: 旧版本存的是全小写, 保留原样(用户重新添加即可恢复大小写)
     renderTagChips();
   }
   async function saveSettings() {

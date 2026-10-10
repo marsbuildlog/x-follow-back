@@ -229,21 +229,27 @@
       const legacy = tr.legacy || {};
       const u = tr.core?.user_results?.result || tr.tweet?.core?.user_results?.result;
       if (!u) return;
+      // 两代 schema: 旧版字段在 u.legacy(followers_count/protected...);
+      //   新版(实测 2026-10 SearchTimeline)无 legacy——身份在 u.core, 计数在 u.relationship_counts,
+      //   保护状态在 u.privacy.protected
       const uLegacy = u.legacy || u.core?.user_legacy || {};
+      const core = u.core || {};
+      const counts = u.relationship_counts || {};
+      const persp = u.relationship_perspectives || {};
       const num = (v) => (Number.isFinite(v) ? v : null);
       out.items.push({
         postId: String(tr.rest_id || legacy.id_str || ''),
         isRetweet: !!(legacy.retweeted_status_result),
         user: {
           userId: u.rest_id || u.core?.id_str,
-          screenName: uLegacy.screen_name || u.core?.screen_name || '',
-          name: uLegacy.name || u.core?.name || '',
+          screenName: core.screen_name || uLegacy.screen_name || '',
+          name: core.name || uLegacy.name || '',
           blue: !!u.is_blue_verified,
-          isProtected: !!(uLegacy.protected ?? u.protected),
-          following: !!(u.relationship_perspectives?.following ?? uLegacy.following),
-          followedBy: !!(u.relationship_perspectives?.followed_by ?? uLegacy.followed_by),
-          followers: num(uLegacy.followers_count),
-          friends: num(uLegacy.friends_count),
+          isProtected: !!(u.privacy?.protected ?? uLegacy.protected ?? u.protected),
+          following: !!(persp.following ?? uLegacy.following),
+          followedBy: !!(persp.followed_by ?? uLegacy.followed_by),
+          followers: num(uLegacy.followers_count ?? counts.followers),
+          friends: num(uLegacy.friends_count ?? counts.following),
         },
       });
     };
@@ -259,6 +265,11 @@
         } else if (id.startsWith('cursor-bottom')) {
           out.cursor = e.content?.value ?? out.cursor;
         }
+      }
+      // 翻页游标也可能以单条替换指令出现(实测 2026-10): TimelineReplaceEntry + cursor-bottom-0
+      if (ins.type === 'TimelineReplaceEntry' && ins.entry) {
+        const rid = ins.entry.entryId || '';
+        if (rid.startsWith('cursor-bottom')) out.cursor = ins.entry.content?.value ?? out.cursor;
       }
     }
     return out;

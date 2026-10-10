@@ -147,14 +147,18 @@
     if (handle) await store.set(K.active, handle);
   }
 
-  // 互关标签页: /hashtag/<tag> 且 tag 在配置列表内(大小写不敏感) → 返回规范化 tag, 否则 null。
+  // 互关标签页: /hashtag/<tag> 且 tag 在配置列表内(大小写不敏感) → 返回配置里的原始写法(保留大小写,
+  // 搜索词必须与真实 hashtag 一致, 如 #蓝V互关 的大写 V), 未配置返回 null。
   // 同步函数: ensureBar 每秒由 SPA 路由检查调用, 不能 await; 配置列表由 refreshCache 异步刷新
   let cachedTags = null;
   function curTag() {
     const pathTag = curTagPath();
     if (!pathTag || cachedTags == null) return null;
-    const tags = cachedTags.map((x) => String(x).replace(/^#/, '').toLowerCase());
-    return tags.includes(pathTag) ? pathTag : null;
+    for (const t of cachedTags) {
+      const norm = String(t).replace(/^#/, '').trim().toLowerCase();
+      if (norm && norm === pathTag) return String(t).replace(/^#/, '').trim();
+    }
+    return null;
   }
   // 互关标签页: /hashtag/<tag>(路径段, 不校验配置列表——配置校验在 curTag 里)
   function curTagPath() {

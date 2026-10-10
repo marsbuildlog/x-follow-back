@@ -472,3 +472,46 @@ test('interpret: 403 code 160 识别为 alreadyFollowing(非故障)', () => {
   assert.equal(r.alreadyFollowing, true);
   assert.equal(r.followLimited, false);
 });
+
+// ---------- 主动关注: 新版 SearchTimeline schema(实测 2026-10, 用户对象无 legacy) ----------
+function newSchemaUser(overrides = {}) {
+  return {
+    __typename: 'User',
+    rest_id: overrides.userId || '1915998627878797312',
+    is_blue_verified: overrides.blue !== false,
+    core: { name: overrides.name || 'User A', screen_name: overrides.screenName || 'usera' },
+    privacy: { protected: !!overrides.protected },
+    relationship_counts: { followers: overrides.followers ?? 217, following: overrides.following ?? 189 },
+    relationship_perspectives: Object.assign({ following: false, followed_by: false }, overrides.rel || {}),
+  };
+}
+function newTweetEntry(result, entryId = 'tweet-9001') {
+  const tid = entryId.replace('tweet-', '');
+  return { entryId, content: { entryType: 'TimelineTimelineItem', itemContent: { tweet_results: { result: {
+    __typename: 'Tweet', rest_id: tid, legacy: { id_str: tid },
+    core: { user_results: { result } },
+  } } } } };
+}
+test('parseSearchTimeline: 新版 schema——计数取 relationship_counts, 保护取 privacy, cursor 取 TimelineReplaceEntry', () => {
+  const body = JSON.stringify({ data: { search_by_raw_query: { search_timeline: { timeline: { instructions: [
+    { type: 'TimelineAddEntries', entries: [
+      newTweetEntry(newSchemaUser()),
+      newTweetEntry(newSchemaUser({ userId: '2', screenName: 'userb', blue: false, protected: true, followers: 9999, following: 5 }), 'tweet-9002'),
+    ] },
+    { type: 'TimelineReplaceEntry', entry_id_to_replace: 'cursor-bottom-0',
+      entry: { entryId: 'cursor-bottom-0', content: { entryType: 'TimelineTimelineCursor', value: 'CURSOR_X' } } },
+  ] } } } } });
+  const out = parseSearchTimeline(body);
+  assert.equal(out.error, null);
+  assert.equal(out.items.length, 2);
+  const u = out.items[0].user;
+  assert.equal(u.screenName, 'usera');
+  assert.equal(u.followers, 217);   // 新 schema 计数字段名不同, 必须取得到(求粉特征依赖它)
+  assert.equal(u.friends, 189);
+  assert.equal(u.isProtected, false);
+  assert.equal(out.cursor, 'CURSOR_X');
+  assert.equal(afEligible(u, 1.2).ok, true);
+  const ub = out.items[1].user;
+  assert.equal(ub.blue, false);
+  assert.equal(afEligible(ub, 1.2).reason, 'not-blue');
+});
