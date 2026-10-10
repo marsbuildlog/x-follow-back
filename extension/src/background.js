@@ -14,6 +14,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     notify(msg.tag || String(Date.now()), msg.title, msg.message);
     return;
   }
+  if (msg.cmd === 'route1-graphql') {
+    route1Graphql(msg.op, msg.query || {})
+      .then(sendResponse)
+      .catch((e) => sendResponse({ error: String((e && e.message) || e) }));
+    return true;
+  }
   if (msg.cmd === 'route1-probe') {
     // 45s 总兑底: SW 里任何环节挂死也保证 options 页拿到应答(分步进度走 rf_r1_probe 实时可见)
     withTimeout(route1Probe(msg.op, msg.variables), 45_000, '探测总时长')
@@ -182,9 +188,47 @@ chrome.webRequest.onBeforeRequest.addListener(
   ['requestBody']
 );
 
+// Route 1 正式发射(扫描/搜索循环用): minimal 三件套(2026-10-11 对照实验双 200, 页面原头非必需)。
+// 返回 {status, ok, body, rl} 或 {error}(结构性缺料/网络异常——调用方据此回退页面重放; HTTP 错误不算 error)。
+async function route1Graphql(op, query) {
+  const tplKey = TPL_PREFIX + op;
+  const { [tplKey]: tpl } = await chrome.storage.local.get(tplKey);
+  if (!tpl || !tpl.p || !tpl.v0) return { error: `rf_tpl:${op} 模板未旁听到或缺变量形状` };
+  const { [RF.KEY.bearer]: bearer } = await chrome.storage.local.get(RF.KEY.bearer);
+  if (!bearer) return { error: 'bearer 未收割' };
+  const ck = await chrome.cookies.get({ url: 'https://x.com/', name: 'ct0' });
+  if (!ck || !ck.value) return { error: '读不到 ct0 cookie' };
+  const { [TID_KEY]: pool0 } = await chrome.storage.local.get(TID_KEY);
+  let pool = pool0 || [];
+  const tidEntry = globalThis.RFTidPool.pick(pool, { path: tpl.p, cooldownMs: RF.AF.TID_COOLDOWN_MS });
+  if (!tidEntry) return { error: '池中无同路径可用 tid(全在冷却)' };
+  // 变量 = 首见形状 + 本次业务参数(rawQuery/count/cursor), 与页面重放同构
+  const variables = Object.assign({}, tpl.v0, { rawQuery: query.rawQuery, count: query.count || 20 });
+  if (query.cursor) variables.cursor = query.cursor; else delete variables.cursor;
+  const req = globalThis.RFRoute1.buildRequest(tpl, variables);
+  const headers = globalThis.RFRoute1.headerSets(tpl.h, bearer, ck.value, tidEntry.t, req.isPost).minimal;
+  const ac = new AbortController();
+  const kill = setTimeout(() => ac.abort(), R1_FETCH_TIMEOUT_MS);
+  let res, body;
+  try {
+    res = await fetch(req.url, { method: req.method, headers, credentials: 'include', body: req.body, signal: ac.signal });
+    body = await res.text();
+  } catch (e) {
+    clearTimeout(kill);
+    return { error: '网络异常: ' + String((e && e.message) || e) + (ac.signal.aborted ? '(>20s 无响应)' : '') };
+  }
+  clearTimeout(kill);
+  const rl = {};
+  for (const k of ['limit', 'remaining', 'reset']) {
+    const v = res.headers && res.headers.get('x-rate-limit-' + k);
+    if (v != null && v !== '') rl[k] = Number(v);
+  }
+  pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tpl.p, res.ok, Date.now());
+  await chrome.storage.local.set({ [TID_KEY]: pool });
+  return { status: res.status, ok: res.ok, body, rl };
+}
 // ---------- Route 1 直连对照实验(ADR-0004) ----------
-// 一次发射最多两发: full(页面原头) → minimal(三件套 bearer+csrf+tid), 各耗一个池内同路径 tid。
-// 意义: ①验证脱离页面的传输层能否 200 ②顺便试出最小头集(为迁移循环定头集)。
+// (探测: 一次发射最多两发 full→minimal, 各耗一个池内同路径 tid; 实验已过, 循环已切 route1-graphql)
 // 429/网络异常即停(桶热了换头集也无益); 4xx 照发 minimal——若同样失败, 说明问题不在头集(参数/模板层)。
 // 可观测性: 每步进度实时写 rf_r1_probe(options 页监听 storage 现场渲染);
 //   每个网络调用带 20s 中断超时——SW 里任何一环挂住都不会让发射永远"发射中"。
