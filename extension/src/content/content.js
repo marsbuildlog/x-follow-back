@@ -278,9 +278,13 @@
       }
       if (page >= MAX_PAGES) incomplete = true;
 
-      // 按 userId 去重后纯追加合并
+      // 按 userId 去重后纯追加合并。
+      // 接口列表是新粉在前, 倒序后老粉排前; 队列纯追加 + 回关循环按队列顺序消费,
+      // 因此先关注你的人(等最久的)会被先回关
       const seen = new Set();
-      const users = all.filter((u) => (seen.has(u.userId) ? false : (seen.add(u.userId), true)));
+      const users = all
+        .filter((u) => (seen.has(u.userId) ? false : (seen.add(u.userId), true)))
+        .reverse();
       const t = await getTask(screenName);
       const added = mergeUsers(t, users);
       await saveTask(screenName, t);
