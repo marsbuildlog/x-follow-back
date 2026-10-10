@@ -7,6 +7,7 @@
 - page-hook 新增 `whoami` 消息: 用任一已捕获请求的认证头调 `GET /i/api/1.1/account/settings.json`, 取真实 `screen_name`, 结果缓存 10 分钟。
 - `afHandle()` 解析链: **whoami 接口 → 侧栏 DOM(兜底) → 最近活跃**。识别结果变化时记日志(`识别当前账号: @x(之前按 @y 记录)`)。
 - 面板展示缓存(refreshCache)与任务写入走同一条解析链, 不再单独猜。
+- **回关侧同理**: 任务账号从页面 URL 读(handle 形如 /:handle/verified_followers), 但 URL handle 必须等于 whoami 结果才采用——逛别人的关注/粉丝列表时不再误认(过去会把拉取到的粉丝写进别人的任务键); 非自己主页时展示退回最近活跃账号。
 
 ## Consequences
 

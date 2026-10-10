@@ -141,7 +141,7 @@
   }
   // options/popup 无页面上下文, 通过最近活跃账号定位任务
   async function activeHandle() {
-    return runningHandle || curHandle() || (await store.get(K.active, null)) || '';
+    return runningHandle || (await pageHandle()) || (await store.get(K.active, null)) || '';
   }
   async function setActive(handle) {
     if (handle) await store.set(K.active, handle);
@@ -176,11 +176,7 @@
   // 当前登录账号: 以 X 接口为准(settings.json, hook 缓存10分钟), DOM 猜测与最近活跃仅作兼容兑底。
   // 多账号登录时侧栏切换器里第一个链接可能是别的账号, 曾把搜索结果写进另一账号的任务键(ADR-0003)
   async function afHandle() {
-    let h = '';
-    try {
-      const r = await callPage('whoami', {});
-      if (r && r.screenName) h = r.screenName;
-    } catch {}
+    let h = await whoamiHandle();
     if (!h) h = loggedInHandle();
     if (!h) h = (await store.get(K.active, null)) || '';
     const prev = await store.get(K.active, null);
@@ -189,6 +185,25 @@
       if (prev) await log(`识别当前账号: @${h}(之前按 @${prev} 记录)`);
     }
     return h;
+  }
+  let meCache = { at: 0, name: '' };
+  // 真实登录账号(hook whoami, 缓存10分钟); 拿不到返回空串
+  async function whoamiHandle() {
+    try {
+      const r = await callPage('whoami', {});
+      if (r && r.screenName) { meCache = { at: Date.now(), name: r.screenName }; return r.screenName; }
+    } catch {}
+    return meCache.name && Date.now() - meCache.at < 10 * 60_000 ? meCache.name : '';
+  }
+  // 页面 URL 里的 handle → 任务账号: 只有等于真实登录账号才算数。
+  // 逛别人的关注/粉丝列表时 URL 是别人的 handle, 过去会被误认成目标账号,
+  // 把拉取到的粉丝写进别人的任务键(2026-10-10 修复, ADR-0003)
+  async function pageHandle() {
+    const urlh = curHandle();
+    if (!urlh) return '';
+    const me = await whoamiHandle();
+    if (!me) return urlh; // whoami 不可用时退回旧行为(兼容)
+    return urlh.toLowerCase() === me.toLowerCase() ? me : '';
   }
 
   // ---------- 与 MAIN world 的桥 ----------
@@ -384,7 +399,7 @@
 
   // 「更新列表」: 立即触发拉取器(拉取与回关解耦, 运行中也可直接拉, 纯追加合并不冲突)
   async function requestRefresh() {
-    const handle = curHandle();
+    const handle = await pageHandle();
     if (!handle) return { ok: false, message: '请在目标账号的 verified_followers 页面上操作' };
     if (fetchingFollowers) return { ok: false, message: '已在拉取中, 请等本轮完成' };
     await log(`手动更新认证粉丝列表(@${handle})`);
@@ -691,7 +706,7 @@
   }
 
   async function startTask(screenName) {
-    screenName = (screenName || '').replace(/\/+$/, '') || curHandle();
+    screenName = (screenName || '').replace(/\/+$/, '') || (await pageHandle());
     if (!screenName) {
       return { ok: false, message: '缺少 screenName——请在目标账号的 verified_followers 页面上操作' };
     }
@@ -878,7 +893,8 @@
 
   // ---------- 自动恢复 / 自动拉取 / 互关帖扫描观察器 ----------
   async function autoTick() {
-    const handle = curHandle();
+    // URL handle 必须匹配登录账号(逛别人主页时不触发任何自动动作)
+    const handle = await pageHandle();
     if (handle) setActive(handle);
     const tag = curTag();
     if (!handle && !tag) return;
@@ -1079,7 +1095,8 @@
 
   async function refreshCache() {
     // 回关任务: 认证粉丝页用 URL 里的账号, 其余页面用最近活跃账号
-    const h = curHandle() || (await store.get(K.active, null));
+    // 回关任务: URL handle 匹配登录账号才用它, 否则退回最近活跃(逛别人主页时面板仍显示自己的任务)
+    const h = (await pageHandle()) || (await store.get(K.active, null));
     cachedTask = h ? await getTask(h) : null;
     cachedFetchProgress = await store.get(K.fetchProgress, null);
     // 主动关注: 仅互关标签页展示; 账号识别与 afHandle 同链(接口为准, ADR-0003)
@@ -1257,7 +1274,7 @@
           ev.preventDefault(); ev.stopPropagation();
           // 标签页 URL 没有账号名, 异步解析(侧栏读取, 退回最近活跃)
           const tag = curTag();
-          const taskHandle = tag ? afHandle() : Promise.resolve(curHandle());
+          const taskHandle = tag ? afHandle() : pageHandle();
           taskHandle.then((handle) => {
             if (act === 'start') return (tag ? startAfTask(handle) : startTask(handle)).then((r) => setPanelMsg(r.message || '已启动'));
             if (act === 'af-search') return runAfSearch(tag, handle).then((r) => setPanelMsg(r.message || String(r.ok)));
