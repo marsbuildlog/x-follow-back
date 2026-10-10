@@ -8,6 +8,8 @@ const {
   localDateStr, rolloverDaily, atName, parseFollowers, interpret,
   mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
   rateLimitBackoffMs, windowExhaustedWaitMs,
+  parseSearchTimeline, passesRatio, afEligible, pickNextItem,
+  mergeAfCandidates, upsertPosts, duePost, markScanned,
 } = globalThis.XFollowBackLogic;
 
 // ---------- 测试工具 ----------
@@ -317,4 +319,156 @@ test('atName: screenName 缺失时退回 userId(不再出现 @undefined)', () =>
   assert.equal(atName({ screenName: 'abc' }), '@abc');
   assert.equal(atName({ userId: '123' }), '@123');
   assert.equal(atName(undefined), '@undefined');
+});
+
+// ---------- 主动关注: parseSearchTimeline ----------
+// 构造 SearchTimeline 风格响应(推文条目 + 会话模块 + 游标)
+function tweetResult(overrides = {}) {
+  return {
+    __typename: 'Tweet',
+    rest_id: overrides.postId || '9001',
+    legacy: Object.assign(
+      { id_str: overrides.postId || '9001', full_text: '互关贴' },
+      overrides.tweetLegacy || {}
+    ),
+    core: { user_results: { result: {
+      __typename: 'User',
+      rest_id: overrides.userId || '1001',
+      is_blue_verified: overrides.blue !== false,
+      core: { name: overrides.name || 'User A', screen_name: overrides.screenName || 'usera' },
+      legacy: Object.assign(
+        { screen_name: overrides.screenName || 'usera', name: overrides.name || 'User A',
+          followers_count: 100, friends_count: 500, protected: false },
+        overrides.userLegacy || {}
+      ),
+      relationship_perspectives: Object.assign({ following: false, followed_by: false }, overrides.rel || {}),
+    } } },
+  };
+}
+function searchWrap(entries, cursorVal = null) {
+  const all = cursorVal ? entries.concat([{ entryId: 'cursor-bottom-2', content: { value: cursorVal, entryType: 'TimelineTimelineCursor' } }]) : entries;
+  return JSON.stringify({
+    data: { search_by_raw_query: { search_timeline: { timeline: { instructions: [{ entries: all }] } } } },
+  });
+}
+
+test('parseSearchTimeline: 解析推文条目/用户/游标', () => {
+  const body = searchWrap([
+    { entryId: 'tweet-9001', content: { itemContent: { tweet_results: { result: tweetResult() } } } },
+    { entryId: 'profile-conversation-9002', content: { entryType: 'TimelineTimelineModule', items: [
+      { entryId: 'tweet-9003', item: { itemContent: { tweet_results: { result: tweetResult({ postId: '9003', userId: '1002', screenName: 'userb' }) } } } },
+    ] } },
+  ], 'CUR');
+  const out = parseSearchTimeline(body);
+  assert.equal(out.error, null);
+  assert.equal(out.items.length, 2);
+  assert.equal(out.items[0].postId, '9001');
+  assert.equal(out.items[0].user.screenName, 'usera');
+  assert.equal(out.items[0].user.followers, 100);
+  assert.equal(out.items[1].user.screenName, 'userb');
+  assert.equal(out.cursor, 'CUR');
+});
+
+test('parseSearchTimeline: 转推标记/墓碑/无游标', () => {
+  const body = searchWrap([
+    { entryId: 'tweet-9001', content: { itemContent: { tweet_results: { result: tweetResult({ tweetLegacy: { retweeted_status_result: { result: {} } } }) } } } },
+    { entryId: 'tweet-9002', content: { itemContent: { tombstone: {} } } },
+  ]);
+  const out = parseSearchTimeline(body);
+  assert.equal(out.error, null);
+  assert.equal(out.items.length, 1);
+  assert.equal(out.items[0].isRetweet, true);
+  assert.equal(out.cursor, null);
+});
+
+test('parseSearchTimeline: 非法响应报错', () => {
+  assert.ok(parseSearchTimeline('not-json').error);
+  assert.ok(parseSearchTimeline('{"data":{}}').error);
+});
+
+// ---------- 主动关注: 求粉特征与候选人资格 ----------
+test('passesRatio: 粉丝/关注 < 1.2 过关; 计数缺失放行; 零关注看人气', () => {
+  assert.equal(passesRatio(100, 500, 1.2), true);   // 0.2 → 在求粉
+  assert.equal(passesRatio(120, 100, 1.2), false);  // 1.2 不小于 1.2
+  assert.equal(passesRatio(100, 50, 1.2), false);   // 2.0 → 不缺粉
+  assert.equal(passesRatio(null, null, 1.2), true); // 字段缺失放行
+  assert.equal(passesRatio(50000, 0, 1.2), false);  // 大V不关注别人 → 不回关
+  assert.equal(passesRatio(0, 0, 1.2), true);
+});
+
+test('afEligible: 蓝V/非保护/未关注/比值 四道门槛依次判', () => {
+  const base = { userId: '1', blue: true, isProtected: false, following: false, followers: 100, friends: 500 };
+  assert.equal(afEligible(base, 1.2).ok, true);
+  assert.equal(afEligible({ ...base, blue: false }, 1.2).reason, 'not-blue');
+  assert.equal(afEligible({ ...base, isProtected: true }, 1.2).reason, 'protected');
+  assert.equal(afEligible({ ...base, following: true }, 1.2).reason, 'already-following');
+  assert.equal(afEligible({ ...base, followers: 9999 }, 1.2).reason, 'ratio');
+  assert.equal(afEligible(null, 1.2).ok, false);
+});
+
+// ---------- 主动关注: 回关优先逐条取数 ----------
+test('pickNextItem: 回关队列优先, 空了取主动关注, 都不在 running 返回 null', () => {
+  const fb = (state, ids) => ({ state, queue: ids.map((id) => ({ userId: id, status: 'pending' })) });
+  const af = (state, ids) => ({ state, queue: ids.map((id) => ({ userId: id, status: 'pending' })) });
+  assert.equal(pickNextItem(fb('running', ['1']), af('running', ['2'])).src, 'fb');
+  assert.equal(pickNextItem(fb('running', []), af('running', ['2'])).src, 'af');
+  assert.equal(pickNextItem(fb('running', ['1']), af('done', ['2'])).src, 'fb');
+  // 回关任务 idle(未启动)时, 主动关注 running 也可消费
+  assert.equal(pickNextItem(fb('idle', ['1']), af('running', ['2'])).src, 'af');
+  // 主动关注 idle 时即便回关队列空也不取
+  assert.equal(pickNextItem(fb('running', []), af('idle', ['2'])), null);
+  assert.equal(pickNextItem(fb('done', []), af('done', ['2'])), null);
+});
+
+// ---------- 主动关注: 队列合并(去重/排除回关队列/容量上限) ----------
+test('mergeAfCandidates: 追加带来源, 剔除已有与回关队列, 达上限停', () => {
+  const t = { queue: [] };
+  const r1 = mergeAfCandidates(t, [
+    { userId: '1', screenName: 'a', name: 'A', source: '#tag' },
+    { userId: '2', screenName: 'b', name: 'B', source: '#tag' },
+  ], new Set(['2']), 100);
+  assert.equal(r1.added, 1);
+  assert.equal(t.queue[0].source, '#tag');
+  assert.equal(t.queue[0].status, 'pending');
+  const r2 = mergeAfCandidates(t, [{ userId: '1', screenName: 'a', name: 'A' }], new Set(), 100);
+  assert.equal(r2.added, 0); // 幂等
+  const r3 = mergeAfCandidates(t, [{ userId: '3' }, { userId: '4' }], new Set(), 2);
+  assert.deepEqual([r3.added, r3.capped], [1, true]);
+  assert.equal(t.queue.length, 2);
+});
+
+// ---------- 主动关注: 互关帖池调度 ----------
+test('upsertPosts/duePost/markScanned: 去重、到期调度、三次封顶', () => {
+  const pool = [];
+  const now = 1_000_000_000_000;
+  assert.equal(upsertPosts(pool, ['p1', 'p2', 'p1'], now).added, 2);
+  assert.equal(upsertPosts(pool, ['p1'], now).added, 0);
+  // 全部到期(nextScanAt = now), 取最早者
+  const p = duePost(pool, now, 3);
+  assert.equal(p.postId, 'p1');
+  // 首扫完成 → 隔两天再到期
+  markScanned(p, now, 2 * 86400_000);
+  assert.equal(p.scanCount, 1);
+  assert.equal(duePost(pool, now, 3).postId, 'p2');
+  assert.equal(duePost(pool, now + 86400_000, 3).postId, 'p2');
+  // 扫掉 p2 后, 两天时刻 p1 到期
+  markScanned(duePost(pool, now + 86400_000, 3), now + 86400_000, 2 * 86400_000);
+  assert.equal(duePost(pool, now + 2 * 86400_000, 3).postId, 'p1');
+  // 扫满三次后不再到期
+  markScanned(p, now + 2 * 86400_000, 2 * 86400_000);
+  markScanned(p, now + 4 * 86400_000, 2 * 86400_000);
+  assert.equal(p.scanCount, 3);
+  const q2 = duePost(pool, now + 3 * 86400_000, 3);
+  markScanned(q2, now + 3 * 86400_000, 2 * 86400_000);
+  markScanned(q2, now + 5 * 86400_000, 2 * 86400_000);
+  markScanned(q2, now + 7 * 86400_000, 2 * 86400_000);
+  assert.equal(duePost(pool, now + 100 * 86400_000, 3), null);
+});
+
+// ---------- interpret: 160 已关注 → skipped 语义 ----------
+test('interpret: 403 code 160 识别为 alreadyFollowing(非故障)', () => {
+  const r = interpret({ status: 403, body: JSON.stringify({ errors: [{ code: 160, message: 'You are not authorized to follow this user.' }] }) });
+  assert.equal(r.ok, false);
+  assert.equal(r.alreadyFollowing, true);
+  assert.equal(r.followLimited, false);
 });

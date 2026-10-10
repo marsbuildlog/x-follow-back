@@ -1,7 +1,8 @@
 // 隔离世界 content script: 页面桥接、拉取器(生产者)、任务执行器(消费者)、x.com 页面状态条。
-// 架构: 拉取器与回关循环解耦, 队列(rf_task:{handle})是唯一交界面:
-//   拉取器: 翻页拉 BlueVerifiedFollowers → 纯追加合并进队列(不碰已有条目), 429 自行退避重试
-//   回关循环: 只消费 pending; 队列空转 done(等待新粉), 拉取器写入新 pending 后自动续跑
+// 架构: 拉取器与关注循环解耦, 队列是唯一交界面:
+//   回关: 拉取器翻页拉 BlueVerifiedFollowers → 纯追加合并进 rf_task:{handle}
+//   主动关注: 搜索/扫描器(互关标签页)把候选人写进 rf_af_task:{handle}(见 CONTEXT.md/ADR-0001)
+//   关注循环: 逐条优先(ADR-0001)——每取下一个人先查回关队列再查主动关注队列, 共享账号级每日计数与限流退避
 // 任务循环跑在 x.com 标签页内(不依赖 MV3 service worker 常驻),
 // 数据按账号分键持久化到 chrome.storage.local, 页面刷新/重开后可恢复。
 (async () => {
@@ -28,9 +29,11 @@
 
   const K = RFg.KEY;
   const OP_FOLLOWERS = 'BlueVerifiedFollowers'; // 认证粉丝列表(GraphQL)
+  const OP_SEARCH = 'SearchTimeline';           // 搜索/互关帖扫描(GraphQL, 原生查询词 + conversation_id 语法)
   const FOLLOW_API = '/i/api/1.1/friendships/create.json'; // 回关动作: v1.1 REST, 非 GraphQL(实测确认)
+  const AF = RFg.AF; // 主动关注写死参数(见 constants.js)
 
-  const RESERVED_HANDLES = new Set(['i', 'home', 'explore', 'notifications', 'messages', 'settings', 'search']);
+  const RESERVED_HANDLES = new Set(['i', 'home', 'explore', 'notifications', 'messages', 'settings', 'search', 'hashtag']);
 
   // ---------- 生命周期守卫 ----------
   // 插件被 reload 后, 旧 content script 会变成孤儿(chrome.* 不可用),
@@ -97,12 +100,22 @@
   }
   const taskKey = (h) => `${K.task}:${h}`;
   const dailyKey = (h) => `${K.daily}:${h}`;
+  const afTaskKey = (h) => `${K.afTask}:${h}`;
 
   function newTask(handle) {
     return {
       state: 'idle', pauseReason: null, nextAutoResumeAt: null,
       screenName: handle, queue: [], consecutiveFailures: [],
       lastError: null, lastFetchAt: null, updatedAt: 0,
+    };
+  }
+  // 主动关注任务: 队列 + 互关帖池(tags[tag].posts)。循环级字段与回关任务同构,
+  // 暂停/退避由两个任务同步共享(ADR-0001: 同一时间只有一个循环)。
+  function newAfTask(handle) {
+    return {
+      state: 'idle', pauseReason: null, nextAutoResumeAt: null,
+      screenName: handle, queue: [], tags: {}, consecutiveFailures: [],
+      lastError: null, updatedAt: 0,
     };
   }
   async function getTask(handle) {
@@ -114,6 +127,15 @@
     t.updatedAt = Date.now();
     await store.set(taskKey(handle), t);
   }
+  async function getAfTask(handle) {
+    if (!handle) return newAfTask('');
+    return (await store.get(afTaskKey(handle), null)) || newAfTask(handle);
+  }
+  async function saveAfTask(handle, t) {
+    t.screenName = handle;
+    t.updatedAt = Date.now();
+    await store.set(afTaskKey(handle), t);
+  }
   async function getDaily(handle) {
     return rolloverDaily(await store.get(dailyKey(handle), null));
   }
@@ -123,6 +145,34 @@
   }
   async function setActive(handle) {
     if (handle) await store.set(K.active, handle);
+  }
+
+  // 互关标签页: /hashtag/<tag> 且 tag 在配置列表内(大小写不敏感) → 返回规范化 tag, 否则 null。
+  // 同步函数: ensureBar 每秒由 SPA 路由检查调用, 不能 await; 配置列表由 refreshCache 异步刷新
+  let cachedTags = null;
+  function curTag() {
+    const pathTag = curTagPath();
+    if (!pathTag || cachedTags == null) return null;
+    const tags = cachedTags.map((x) => String(x).replace(/^#/, '').toLowerCase());
+    return tags.includes(pathTag) ? pathTag : null;
+  }
+  // 互关标签页: /hashtag/<tag>(路径段, 不校验配置列表——配置校验在 curTag 里)
+  function curTagPath() {
+    const m = /^\/hashtag\/([^/?#]+)/.exec(location.pathname);
+    return m ? decodeURIComponent(m[1]).replace(/^#/, '').toLowerCase() : null;
+  }
+  // 标签页 URL 里没有账号名, 从侧栏账号切换器读当前登录账号; 拿不到退回最近活跃账号
+  function loggedInHandle() {
+    const el = document.querySelector('[data-testid="SideNav_AccountSwitcher_AccountSwitcher"]');
+    const link = el && el.querySelector('a[href^="/"]');
+    const m = link && /^\/([^/]+)/.exec(link.getAttribute('href') || '');
+    const h = m ? m[1] : '';
+    return h && !RESERVED_HANDLES.has(h) ? h : '';
+  }
+  async function afHandle() {
+    const h = loggedInHandle() || (await store.get(K.active, null)) || '';
+    if (h) await setActive(h);
+    return h;
   }
 
   // ---------- 与 MAIN world 的桥 ----------
@@ -172,8 +222,9 @@
   }
 
   // ---------- 通用工具 ----------
-  // 纯逻辑(parseFollowers/interpret/mergeUsers/...)在 shared/logic.js(顶部已显式 import), 有单元测试覆盖
-  const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName, rateLimitBackoffMs, windowExhaustedWaitMs } = L;
+  // 纯逻辑(parseFollowers/interpret/mergeUsers/pickNextItem/...)在 shared/logic.js(顶部已显式 import), 有单元测试覆盖
+  const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName, rateLimitBackoffMs, windowExhaustedWaitMs,
+    parseSearchTimeline, afEligible, pickNextItem, mergeAfCandidates, upsertPosts, duePost, markScanned } = L;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
   // 分段休眠(每段≤30s): 后台标签页的定时器会被 Chrome 节流到约1次/分钟,
@@ -187,14 +238,15 @@
     }
   }
   async function sleepInterruptible(ms, handle) {
-    // 休眠期间随时检查: 任务被暂停/账号被切换 → 提前退出(返回 false)
+    // 休眠期间随时检查: 两个任务都不再 running / 账号被切换 → 提前退出(返回 false)
     const deadline = Date.now() + ms;
     while (true) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return true;
       await sleep(Math.min(remaining, 30_000));
-      const task = await store.get(taskKey(handle), null);
-      if (!task || task.state !== 'running') return false;
+      const fb = await store.get(taskKey(handle), null);
+      const af = await store.get(afTaskKey(handle), null);
+      if ((!fb || fb.state !== 'running') && (!af || af.state !== 'running')) return false;
       if (!(await isLockMine())) return false;
     }
   }
@@ -325,6 +377,213 @@
   }
 
   // ============================================================
+  // 主动关注(蓝色V互关): 搜索阶段 + 扫描阶段(生产者, 只在互关标签页运行)
+  //   搜索: 手动触发, 翻页拉互关帖 → 帖子 ID 入互关帖池, 帖子作者入队列
+  //   扫描: 到期帖子的回复翻页 → 新评论者/作者入队列; 首扫拉完, 隔两天重扫, 最多三次
+  //   两者共用 SearchTimeline 模板(标签页加载时自动捕获), 扫描用 conversation_id: 语法
+  // ============================================================
+  let afSearching = false;
+  let afScanning = false;
+
+  // 从 SearchTimeline 响应里筛出合格候选人(去转推, 过滤蓝V/保护/已关注/比值)
+  function eligibleFromItems(items, tag) {
+    const stats = { total: 0, retweet: 0, notBlue: 0, protected: 0, already: 0, ratio: 0 };
+    const users = [];
+    for (const it of items || []) {
+      if (it.isRetweet) { stats.retweet++; continue; }
+      stats.total++;
+      const el = afEligible(it.user, AF.RATIO_MAX);
+      if (!el.ok) {
+        if (el.reason === 'not-blue') stats.notBlue++;
+        else if (el.reason === 'protected') stats.protected++;
+        else if (el.reason === 'already-following') stats.already++;
+        else if (el.reason === 'ratio') stats.ratio++;
+        continue;
+      }
+      users.push({ userId: it.user.userId, screenName: it.user.screenName, name: it.user.name, source: tag });
+    }
+    return { users, stats };
+  }
+
+  // 把候选人合入主动关注队列(剔除已在回关队列的人), done 状态下扫到新人自动续跑
+  async function enqueueAfCandidates(handle, users, tag) {
+    if (!users.length) return { added: 0, capped: false };
+    const fb = await getTask(handle);
+    const exclude = new Set(fb.queue.map((q) => q.userId));
+    const t = await getAfTask(handle);
+    const { added, capped } = mergeAfCandidates(t, users, exclude, AF.QUEUE_CAP);
+    if (capped) {
+      t.lastError = `主动关注队列已达上限(${AF.QUEUE_CAP}), 暂停入队`;
+      await log(`⚠ ${t.lastError}`);
+    }
+    await saveAfTask(handle, t);
+    // 等待中(done)扫到新 pending → 自动续跑; idle(未启动过)不自动开跑
+    if (t.state === 'done' && t.queue.some((q) => q.status === 'pending')) {
+      t.state = 'running';
+      t.pauseReason = null;
+      t.nextAutoResumeAt = null;
+      await saveAfTask(handle, t);
+      await log('检测到新待关注, 主动关注自动续跑');
+      runLoop(handle);
+    }
+    return { added, capped };
+  }
+
+  // 重放 SearchTimeline, 返回解析结果(429 按 reset 退避重试同一页, 最多3次)
+  async function searchPage(rawQuery, cursor) {
+    const cap = await callPage('list-captured', {});
+    const entry = (cap.operations || []).find((o) => o.operationName === OP_SEARCH);
+    if (!entry) return { error: `未捕获到 ${OP_SEARCH} 请求——请先打开互关标签页并等它加载完` };
+    const variables = { ...(entry.variables || {}), rawQuery, count: AF.SEARCH_PAGE_SIZE };
+    if (cursor) variables.cursor = cursor; else delete variables.cursor;
+    let retries = 0;
+    while (true) {
+      const res = await callGraphQL(OP_SEARCH, variables);
+      if (res.status === 429) {
+        if (++retries > 3) return { rateLimitedOut: true };
+        const backoff = rateLimitBackoffMs(interpret(res), Date.now(), 15 * 60_000);
+        await log(`搜索限流, ${Math.round(backoff / 1000)}秒后重试`);
+        await sleepSegments(backoff);
+        continue;
+      }
+      const parsed = parseSearchTimeline(res.body);
+      return parsed;
+    }
+  }
+
+  // 搜索阶段(手动): 翻页拉互关帖, 帖子入池 + 作者入队。
+  // 分页期间只攒本地数据, 不持有任务对象(避免覆盖循环写入的状态); 最后逐块"重读→改→存"
+  async function runAfSearch(tag, handle) {
+    if (afSearching) return { ok: false, message: '已在搜索中' };
+    if (!handle) return { ok: false, message: '未识别到登录账号——请确认已登录 x.com' };
+    afSearching = true;
+    try {
+      await setActive(handle);
+      const rawQuery = '#' + tag;
+      let cursor = null;
+      let page = 0;
+      let incomplete = false;
+      const postIds = [];
+      const nonRtItems = [];
+      while (page < AF.SEARCH_MAX_PAGES) {
+        const out = await searchPage(rawQuery, cursor);
+        if (out.error) { await log(`搜索失败: ${out.error}`); return { ok: false, message: out.error }; }
+        if (out.rateLimitedOut) { incomplete = true; await log('搜索连续限流, 本轮先合并已拉到的部分'); break; }
+        for (const it of out.items) {
+          if (it.postId) postIds.push(it.postId);
+          if (!it.isRetweet) nonRtItems.push(it);
+        }
+        await store.set(K.afProgress, { tag, page: page + 1, maxPages: AF.SEARCH_MAX_PAGES, posts: postIds.length });
+        await log(`搜索第${page + 1}页: 累计帖子${postIds.length}, cursor=${out.cursor ? '有' : '无'}`);
+        if (!out.cursor || out.cursor === cursor || out.items.length === 0) break;
+        cursor = out.cursor;
+        page++;
+        await sleep(800 + Math.random() * 700);
+      }
+      if (page >= AF.SEARCH_MAX_PAGES) incomplete = true;
+
+      // 帖子入池(新帖 nextScanAt=now, 首扫立即到期): 重读→改→存, 中间无 await
+      let poolAdded = 0, poolTotal = 0;
+      {
+        const t = await getAfTask(handle);
+        const pool = (t.tags[tag] = t.tags[tag] || { posts: [] }).posts;
+        poolAdded = upsertPosts(pool, postIds, Date.now()).added;
+        poolTotal = pool.length;
+        await saveAfTask(handle, t);
+      }
+      // 候选人入队(内部自己重读→追加→存, 并处理 done 自动续跑)
+      const { users, stats } = eligibleFromItems(nonRtItems, tag);
+      const candOut = await enqueueAfCandidates(handle, users, tag);
+      const t2 = await getAfTask(handle);
+      const pending = t2.queue.filter((q) => q.status === 'pending').length;
+      await log(`搜索完成${incomplete ? '(可能不全)' : ''}: 帖子池+${poolAdded}(共${poolTotal}), 候选+${candOut.added}` +
+        `(非蓝V${stats.notBlue}/比值${stats.ratio}/已关注${stats.already}/保护${stats.protected}/转推${stats.retweet})` +
+        `, 待关注${pending}`);
+      return {
+        ok: true,
+        message: `帖子池+${poolAdded}(共${poolTotal}), 候选+${candOut.added}, 待关注${pending}` + (incomplete ? '(可能不全)' : ''),
+      };
+    } catch (e) {
+      await log(`搜索失败: ${e}`);
+      return { ok: false, message: String(e) };
+    } finally {
+      afSearching = false;
+      await store.set(K.afProgress, null);
+    }
+  }
+
+  // 扫描阶段(自动): 扫一个到期帖子的回复, 新评论者入队。每 tick 至多一帖。
+  // 分页期间只攒本地数据; 限流中断不消耗扫描次数, 隔半小时重试
+  async function runAfScanOne(tag, handle) {
+    if (afScanning || afSearching) return;
+    afScanning = true;
+    try {
+      // 选帖(只读快照): 挑最早到期的到期帖
+      const t0 = await getAfTask(handle);
+      const post = duePost((t0.tags[tag] && t0.tags[tag].posts) || [], Date.now(), AF.SCAN_MAX);
+      if (!post) return;
+      const postId = post.postId;
+      const scanNo = post.scanCount + 1;
+      let cursor = null;
+      let page = 0;
+      let limited = false;
+      const allItems = [];
+      while (page < AF.SCAN_MAX_PAGES) {
+        const out = await searchPage(`conversation_id:${postId}`, cursor);
+        if (out.error) { await log(`扫描帖子 ${postId} 失败: ${out.error}`); return; }
+        if (out.rateLimitedOut) { limited = true; break; }
+        allItems.push(...out.items);
+        if (!out.cursor || out.cursor === cursor || out.items.length === 0) break;
+        cursor = out.cursor;
+        page++;
+        await sleep(800 + Math.random() * 700);
+      }
+      // 网络阶段结束, 重读→改帖池→存(中间无 await)
+      const t1 = await getAfTask(handle);
+      const post1 = ((t1.tags[tag] = t1.tags[tag] || { posts: [] }).posts || []).find((p) => p.postId === postId);
+      if (post1) {
+        if (limited) post1.nextScanAt = Date.now() + AF.SCAN_RETRY_MS;
+        else markScanned(post1, Date.now(), AF.SCAN_INTERVAL_MS);
+      }
+      await saveAfTask(handle, t1);
+      if (limited) {
+        await log(`扫描帖子 ${postId} 被限流, 隔${AF.SCAN_RETRY_MS / 60000}分钟重试(不消耗扫描次数)`);
+        return;
+      }
+      const { users } = eligibleFromItems(allItems, tag);
+      const { added } = await enqueueAfCandidates(handle, users, tag);
+      await log(`扫描帖子 ${postId}(第${scanNo}/${AF.SCAN_MAX}次, ${page + 1}页): 候选+${added}`);
+    } catch (e) {
+      await log(`扫描异常: ${e}`);
+    } finally {
+      afScanning = false;
+    }
+  }
+
+  // 主动关注启动(标签页面板按钮): 与回关同一个循环, 逐条优先自动生效
+  async function startAfTask(handle) {
+    if (!handle) return { ok: false, message: '未识别到登录账号——请确认已登录 x.com' };
+    if (runningHandle) return { ok: false, message: `任务已在运行(@${runningHandle})` };
+    try {
+      const cap = await callPage('list-captured', {});
+      if (!(cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API)) {
+        return { ok: false, message: '首次使用: 请先在认证粉丝列表里点一次任意用户的「回关」按钮(模板只需学一次), 再点开始' };
+      }
+    } catch {}
+    const t = await getAfTask(handle);
+    const pending = t.queue.filter((q) => q.status === 'pending').length;
+    t.state = 'running';
+    t.pauseReason = null;
+    t.nextAutoResumeAt = null;
+    t.lastError = null;
+    await saveAfTask(handle, t);
+    await setActive(handle);
+    await log(`主动关注启动: 待关注${pending}`);
+    runLoop(handle);
+    return { ok: true, message: pending > 0 ? `待关注${pending}, 已开始` : '队列暂空——先点「抓取互关帖」, 扫到人会自动开跑' };
+  }
+
+  // ============================================================
   // 任务状态机 + 回关循环(消费者)
   // ============================================================
   let runningHandle = null; // 本标签页正在跑回关的账号(同一时间只跑一个)
@@ -348,29 +607,38 @@
       if (p && p.catch) p.catch(() => {});
     } catch {} // 孤儿/通知失败不影响主流程
   }
+  // 循环级暂停: 两个任务同步(ADR-0001 同一时间只有一个循环, 退避状态不区分任务)
   async function pauseTask(handle, reason, resumeAt) {
-    const t = await getTask(handle);
-    t.state = 'paused';
-    t.pauseReason = reason;
-    t.nextAutoResumeAt = resumeAt || null;
-    await saveTask(handle, t);
+    for (const [get, save] of [[getTask, saveTask], [getAfTask, saveAfTask]]) {
+      const t = await get(handle);
+      if (t.state !== 'running') continue;
+      t.state = 'paused';
+      t.pauseReason = reason;
+      t.nextAutoResumeAt = resumeAt || null;
+      await save(handle, t);
+    }
     await log(`任务暂停(${reason})`);
     if (reason !== 'manual') notifyPause(reason);
   }
+  // 恢复: 两个任务一起恢复(手动恢复任一面板效果相同); 失败项重新入队重试
   async function resumeTask(handle) {
-    const t = await getTask(handle);
-    if (t.state !== 'paused' && t.state !== 'idle') return t;
-    // 失败项重新入队重试
-    for (const item of t.queue) {
-      if (item.status === 'failed') { item.status = 'pending'; item.error = null; }
+    let resumed = false;
+    for (const [get, save] of [[getTask, saveTask], [getAfTask, saveAfTask]]) {
+      const t = await get(handle);
+      if (t.state !== 'paused') continue;
+      for (const item of t.queue) {
+        if (item.status === 'failed') { item.status = 'pending'; item.error = null; }
+      }
+      t.state = 'running';
+      t.pauseReason = null;
+      t.nextAutoResumeAt = null;
+      await save(handle, t);
+      resumed = true;
     }
-    t.state = 'running';
-    t.pauseReason = null;
-    t.nextAutoResumeAt = null;
-    await saveTask(handle, t);
+    if (!resumed) return getTask(handle);
     await log('任务恢复');
     runLoop(handle);
-    return t;
+    return getTask(handle);
   }
 
   async function startTask(screenName) {
@@ -407,40 +675,57 @@
     };
   }
 
-  // ---------- 主循环(消费者) ----------
+  // ---------- 主循环(消费者, 两队列一循环见 ADR-0001) ----------
   let loopRunning = false;
   async function runLoop(handle) {
     if (loopRunning || !handle) return;
     if (!(await acquireLock())) return;
     loopRunning = true;
     runningHandle = handle;
+    // src → 该任务的读写器(回关/主动关注各自的存储键)
+    const io = {
+      fb: { get: getTask, save: saveTask },
+      af: { get: getAfTask, save: saveAfTask },
+    };
     try {
-      let task = await store.get(taskKey(handle), null);
-      if (!task || task.state !== 'running') return;
       let rateRetryUserId = null; // B: 429 重试同一人计数
       let rateRetryCount = 0;
       let errorStreak = 0;        // C: 请求层连续异常计数
 
       while (true) {
         await refreshLock();
-        if (!task || task.state !== 'running') break;
-        const settings = await getSettings();
-        const item = task.queue.find((i) => i.status === 'pending');
-        if (!item) {
-          task.state = 'done';
-          await saveTask(handle, task);
-          await log('队列已空, 等待新粉丝(自动/手动拉取到新待回关后会自动续跑)');
-          break;
+        // 逐条优先(ADR-0001): 每取下一个人先查回关队列, 空了才取主动关注队列
+        let src, task, item;
+        {
+          const fb = await io.fb.get(handle);
+          const af = await io.af.get(handle);
+          if (fb.state !== 'running' && af.state !== 'running') break;
+          const picked = pickNextItem(fb, af);
+          if (!picked) {
+            // 各自收尾: running 但已无 pending → done
+            let changed = false;
+            if (fb.state === 'running' && !fb.queue.some((i) => i.status === 'pending')) { fb.state = 'done'; changed = true; }
+            if (af.state === 'running' && !af.queue.some((i) => i.status === 'pending')) { af.state = 'done'; changed = true; }
+            if (changed) {
+              await io.fb.save(handle, fb); await io.af.save(handle, af);
+              await log('队列已空: 回关等待新粉(拉到后自动续跑), 主动关注已清空(扫到新人后自动续跑)');
+            }
+            break;
+          }
+          src = picked.src;
+          task = src === 'fb' ? fb : af;
+          item = picked.item;
         }
 
         // 随机间隔(模拟人工)
+        const settings = await getSettings();
         const delayMs = randInt(settings.intervalMin, settings.intervalMax) * 1000;
         if (!(await sleepInterruptible(delayMs, handle))) break;
 
         // 重读 task 后旧 item 引用已失效, 按 userId 重新定位。
         // (否则"已完成"标在旧快照上, 存储里仍是 pending, 会重复关注同一人)
-        task = await store.get(taskKey(handle), null);
-        if (!task || task.state !== 'running') break;
+        task = await io[src].get(handle);
+        if (task.state !== 'running') break;
         if (!(await isLockMine())) break;
         const current = findPendingItem(task.queue, item.userId);
         if (!current) continue; // 已被其他流程处理, 换下一个
@@ -468,11 +753,11 @@
           current.doneAt = Date.now();
           current.error = null;
           task.consecutiveFailures = [];
-          await saveTask(handle, task); // 先落库(get→改→存之间无 await, 不会被拉取器插入)
+          await io[src].save(handle, task); // 先落库(get→改→存之间无 await, 不会被拉取器插入)
           const d = await getDaily(handle);
           d.followed++;
           await store.set(dailyKey(handle), d);
-          await log(`已关注 ${atName(current)}, 今日 ${d.followed}`);
+          await log(`已关注 ${atName(current)}${src === 'af' ? '(主动)' : ''}, 今日 ${d.followed}`);
           // 主动限流: 窗口次数耗尽时等到 reset 再发下一个, 避免吃 429
           const pw = windowExhaustedWaitMs(r, Date.now());
           if (pw > 0) {
@@ -489,7 +774,7 @@
             current.status = 'failed';
             current.error = `连续限流 ${rateRetryCount} 次: ${r.errorText}`;
             task.lastError = `${atName(current)}: ${current.error}`;
-            await saveTask(handle, task);
+            await io[src].save(handle, task);
             await log(`关注失败 ${atName(current)}: 连续限流, 暂时跳过(恢复时重新入队)`);
             rateRetryUserId = null;
           } else {
@@ -497,6 +782,13 @@
             await log(`限流(${rateRetryCount}/3)${resetTxt}, ${Math.round(backoff / 1000)}秒后重试同一人 ${atName(current)}`);
             if (!(await sleepInterruptible(backoff, handle))) break;
           }
+        } else if (r.alreadyFollowing) {
+          // 160: 对方已在关注列表(或无法关注)——不是故障, 标 skipped 不进失败窗口
+          rateRetryUserId = null;
+          current.status = 'skipped';
+          current.error = r.errorText;
+          await io[src].save(handle, task);
+          await log(`跳过 ${atName(current)}(已关注/无法关注)`);
         } else {
           // 其他失败: 标 failed, 记原始错误
           rateRetryUserId = null;
@@ -507,26 +799,26 @@
             // 161: 关注数已达上限(实测包在 HTTP 403 里返回)。X 按 24h 滚动窗口重置, 与本地 0 点无关,
             // 固定等到次日 0 点会白等十几小时 → 定时探测: 每 dailyLimitRetryMin 分钟恢复试一次,
             // 成功即续跑, 仍 161 则再等一轮。重试时该项标 failed 后由 resumeTask 重新入队, 不会丢人。
-            await saveTask(handle, task);
+            await io[src].save(handle, task);
             await log(`关注数已达上限: ${settings.dailyLimitRetryMin}分钟后自动探测重试(直到额度恢复)`);
             await pauseTask(handle, 'daily-limit', Date.now() + settings.dailyLimitRetryMin * 60_000);
           } else if (res.status === 403) {
-            // 403 且非 161: 大概率回关模板过期 → 立即暂停 + 系统通知, 不空转烧请求
-            await saveTask(handle, task);
+            // 403 且非 161/160: 大概率回关模板过期 → 立即暂停 + 系统通知, 不空转烧请求
+            await io[src].save(handle, task);
             await log(`模板过期(403) ${atName(current)}: 请在认证粉丝列表点一次「回关」刷新模板, 然后手动恢复`);
             await pauseTask(handle, 'template-expired');
           } else {
             task.consecutiveFailures.push(Date.now());
             const stall = evaluateStall(task.consecutiveFailures, Date.now(), settings.stallMin * 60_000, settings.stallMin * 60_000);
             task.consecutiveFailures = stall.kept;
-            await saveTask(handle, task); // 先落库
+            await io[src].save(handle, task); // 先落库
             await log(`关注失败 ${atName(current)}: ${r.errorText}`);
             if (stall.shouldPause) {
               await pauseTask(handle, 'stalled', Date.now() + settings.autoResumeMin * 60_000);
             }
           }
         }
-        task = await store.get(taskKey(handle), null);
+        task = await io[src].get(handle);
         if (!task || task.state !== 'running') break;
       }
     } finally {
@@ -535,15 +827,40 @@
     }
   }
 
-  // ---------- 自动恢复 / 自动拉取观察器 ----------
+  // ---------- 自动恢复 / 自动拉取 / 互关帖扫描观察器 ----------
   async function autoTick() {
     const handle = curHandle();
     if (handle) setActive(handle);
-    if (!handle) return;
+    const tag = curTag();
+    if (!handle && !tag) return;
+    if (fetchingFollowers || afSearching || afScanning) return;
+    const settings = await getSettings();
+
+    // 互关标签页: 主动关注任务接管/恢复优先, 其次到期帖扫描(每 tick 一帖)
+    if (tag) {
+      const h = await afHandle();
+      if (!h) return;
+      const af0 = await getAfTask(h);
+      // 接管中断的任务(页面刷新后 loopRunning=false, 任务仍是 running)
+      if (af0.state === 'running' && !loopRunning) {
+        if (!(await isLockMine()) && !(await acquireLock())) return;
+        runLoop(h);
+        return;
+      }
+      if (af0.state === 'paused' && af0.nextAutoResumeAt && Date.now() >= af0.nextAutoResumeAt) {
+        if (await acquireLock()) resumeTask(h); // 恢复入口双任务同步
+        return;
+      }
+      // 到期帖扫描: 生产者, 与循环解耦(纯追加合并); 无到期帖时内部静默返回
+      if (document.visibilityState === 'visible') {
+        if (await acquireLock()) runAfScanOne(tag, h);
+      }
+      return; // 标签页不做回关自动拉取(那是 verified_followers 页的事)
+    }
+
     if (fetchingFollowers) return;
 
     // 自动拉取: 页面可见 + 距上次拉取(含手动)超过 autoFetchMin 分钟
-    const settings = await getSettings();
     const t0 = await getTask(handle);
     if (document.visibilityState === 'visible' &&
         (!t0.lastFetchAt || Date.now() - t0.lastFetchAt >= settings.autoFetchMin * 60_000)) {
@@ -642,6 +959,9 @@
   }
   let cachedTask = null;
   let cachedFetchProgress = null;
+  let cachedAfTask = null;   // 主动关注任务缓存(仅互关标签页展示用)
+  let cachedAfHandle = '';
+  let cachedAfProgress = null; // 搜索阶段进度(存储键, 搜索结束后置 null)
 
   const WIDGET_CSS = `
     #xfollowback-widget { position: fixed; top: 20px; z-index: 99999; display: flex; flex-direction: column; align-items: flex-end;
@@ -699,16 +1019,35 @@
     return STATE_STYLE.idle;
   }
 
+  // 主动关注状态文案(done = 队列已清空, 与回关的"等待新粉"区分)
+  function afCurrentState(t) {
+    if (!t) return STATE_STYLE.idle;
+    if (t.state === 'running') return (cachedAfProgress || afSearching || afScanning) ? STATE_STYLE.fetching : STATE_STYLE.running;
+    if (t.state === 'paused') return STATE_STYLE['paused:' + t.pauseReason] || { text: '已暂停', color: '#d97706' };
+    if (t.state === 'done') return { text: '队列已空', color: '#16a34a' };
+    return STATE_STYLE.idle;
+  }
+
   async function refreshCache() {
+    // 回关任务: 认证粉丝页用 URL 里的账号, 其余页面用最近活跃账号
     const h = curHandle() || (await store.get(K.active, null));
     cachedTask = h ? await getTask(h) : null;
     cachedFetchProgress = await store.get(K.fetchProgress, null);
+    // 主动关注: 仅互关标签页展示; 账号从侧栏读, 拿不到退回最近活跃
+    cachedTags = ((await getSettings()).tags) || [];
+    const tag = curTag();
+    const ah = tag ? (loggedInHandle() || (await store.get(K.active, null)) || '') : '';
+    cachedAfHandle = ah;
+    cachedAfTask = tag && ah ? await getAfTask(ah) : null;
+    cachedAfProgress = await store.get(K.afProgress, null);
   }
   chrome.storage.onChanged.addListener(refreshCache);
   refreshCache();
 
   function renderWidget() {
     if (!widget) return;
+    const tag = curTag();
+    if (tag) return renderAfWidget(tag);
     const t = cachedTask || { state: 'idle' };
     const q = t.queue || [];
     const total = q.length;
@@ -750,6 +1089,53 @@
     `;
   }
 
+  // 互关标签页面板(主动关注): 状态/帖子池/队列 + 抓取与启停
+  function renderAfWidget(tag) {
+    const t = cachedAfTask || { state: 'idle' };
+    const q = t.queue || [];
+    const total = q.length;
+    const pending = q.filter((i) => i.status === 'pending').length;
+    const pool = (t.tags && t.tags[tag] && t.tags[tag].posts) || [];
+    const dueCount = pool.filter((p) => p.scanCount < AF.SCAN_MAX && p.nextScanAt <= Date.now()).length;
+    const st = afCurrentState(t);
+    const sig = ['af', t.state, t.pauseReason, t.nextAutoResumeAt, total, pending, pool.length, dueCount, st.text,
+      panelOpen, panelMsg, cachedTemplateCaptured, afScanning, afSearching,
+      cachedAfProgress ? cachedAfProgress.page : 0, t.lastError, t.screenName, tag].join('|');
+    if (sig === widget.dataset.sig) return;
+    widget.dataset.sig = sig;
+
+    const pill = widget.querySelector('#xfollowback-pill');
+    if (st.alert) {
+      pill.classList.add('alert');
+      pill.textContent = `⚠ ${st.text} · 点击处理`;
+    } else {
+      pill.classList.remove('alert');
+      pill.innerHTML = `<span class="dot" style="background:${st.color}"></span>主动关注 ${pending}`;
+    }
+
+    const panel = widget.querySelector('#xfollowback-panel');
+    const pauseHint = t.state === 'paused' && t.nextAutoResumeAt
+      ? ' · ' + Math.max(0, Math.round((t.nextAutoResumeAt - Date.now()) / 60000)) + '分钟后自动恢复' : '';
+    const searchInfo = cachedAfProgress ? ` · 搜索第${cachedAfProgress.page}/${cachedAfProgress.maxPages}页`
+      : (afScanning ? ' · 扫描回复中' : '');
+    const actionBtn = t.state === 'running'
+      ? `<button class="rf-btn primary" data-act="pause">暂停</button>`
+      : t.state === 'paused'
+        ? `<button class="rf-btn ${st.alert ? 'warn' : 'primary'}" data-act="resume">恢复</button>`
+        : `<button class="rf-btn primary" data-act="start">开始主动关注</button>`;
+    panel.innerHTML = `
+      <div class="rf-head"><strong>XFollowBack</strong><span>主动关注 #${escHtml(tag)} · @${escHtml(t.screenName) || '—'}</span></div>
+      <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${searchInfo}</div>
+      <div class="rf-nums">帖子池 <b>${pool.length}</b> · 待扫描 <b>${dueCount}</b> · 队列 <b>${total}</b> · 待关注 <b>${pending}</b></div>
+      ${cachedTemplateCaptured === false ? `<div class="rf-guide">首次使用: 请先在认证粉丝列表页点一次任意用户的「回关」按钮, 插件学会关注动作后回来点「开始」(只需一次)</div>` : ''}
+      ${st.alert ? `<div class="rf-alert">回关模板已过期——请在认证粉丝列表页点一次「回关」刷新, 再点「恢复」</div>` : ''}
+      ${panelMsg ? `<div class="rf-msg">${escHtml(panelMsg)}</div>` : ''}
+      ${t.lastError ? `<div class="rf-err">最近错误: ${escHtml(t.lastError).slice(0, 160)}</div>` : ''}
+      <div class="rf-btns">${actionBtn}<button class="rf-btn ghost" data-act="af-search">抓取互关帖</button></div>
+      <div class="rf-keep">⏳ 保持本标签页开启: 扫描与关注都在此页面内运行, 关闭会暂停, 重新打开自动继续</div>
+    `;
+  }
+
   // 定位: 紧贴认证关注者页顶部姓名(h2)右侧一点点, 垂直在姓名行父容器内居中;
   // h2 不可得时退回主列右缘, 再退回右上角
   function positionWidget() {
@@ -786,9 +1172,17 @@
     }
   }
 
+  let lastPath = '';
   function ensureBar() {
+    // SPA 路由切换不触发 storage 事件, 靠路径变化强制刷新缓存(否则控件拿旧任务渲染)
+    if (location.pathname !== lastPath) {
+      lastPath = location.pathname;
+      refreshCache();
+    }
+    const tag = curTag();
     const onVerifiedFollowers = /^\/[^/]+\/verified_followers/.test(location.pathname);
-    if (!onVerifiedFollowers) {
+    // 认证粉丝页 → 回关面板; 已配置的互关标签页 → 主动关注面板; 其余页面不展示
+    if (!tag && !onVerifiedFollowers) {
       if (widget) { widget.remove(); widget = null; }
       return;
     }
@@ -812,11 +1206,16 @@
         const act = ev.target && ev.target.dataset && ev.target.dataset.act;
         if (act) {
           ev.preventDefault(); ev.stopPropagation();
-          const handle = curHandle();
-          if (act === 'start') startTask(handle).then((r) => setPanelMsg(r.message || '已启动'));
-          else if (act === 'refresh') requestRefresh().then((r) => setPanelMsg(r.message || String(r.ok)));
-          else if (act === 'pause') pauseTask(handle, 'manual').then(() => setPanelMsg('已暂停'));
-          else if (act === 'resume') resumeTask(handle).then(() => setPanelMsg('已恢复'));
+          // 标签页 URL 没有账号名, 异步解析(侧栏读取, 退回最近活跃)
+          const tag = curTag();
+          const taskHandle = tag ? afHandle() : Promise.resolve(curHandle());
+          taskHandle.then((handle) => {
+            if (act === 'start') return (tag ? startAfTask(handle) : startTask(handle)).then((r) => setPanelMsg(r.message || '已启动'));
+            if (act === 'af-search') return runAfSearch(tag, handle).then((r) => setPanelMsg(r.message || String(r.ok)));
+            if (act === 'refresh') return requestRefresh().then((r) => setPanelMsg(r.message || String(r.ok)));
+            if (act === 'pause') return pauseTask(handle, 'manual').then(() => setPanelMsg('已暂停'));
+            if (act === 'resume') return resumeTask(handle).then(() => setPanelMsg('已恢复'));
+          }).catch(() => {});
           return;
         }
         if (ev.target.closest('#xfollowback-pill')) {

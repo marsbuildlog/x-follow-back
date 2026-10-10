@@ -153,12 +153,45 @@
   }
 
   // ---------- 设置(精简: 仅暴露常用项, 其余用内置默认值) ----------
+  // 互关标签列表: 保存前的内存副本, 增删直接改它, 随保存一起落盘
+  let pendingTags = [];
+
+  function normalizeTag(t) {
+    return String(t || '').trim().replace(/^#/, '').toLowerCase();
+  }
+
+  function renderTagChips() {
+    const wrap = $('tag-chips');
+    if (!pendingTags.length) {
+      wrap.innerHTML = '<span class="hint">尚未配置——添加后打开对应 tag 页即可启用主动关注</span>';
+      return;
+    }
+    wrap.innerHTML = pendingTags.map((t, i) =>
+      `<span style="display:inline-flex;align-items:center;gap:4px;background:#e8f5fd;color:#0b5ed7;border-radius:10px;padding:2px 10px;font-size:13px">#${esc(t)}` +
+      `<button data-rm-tag="${i}" style="margin:0;padding:0 6px;border:none;background:none;color:#0b5ed7;cursor:pointer;font-weight:700">×</button></span>`
+    ).join('');
+    wrap.querySelectorAll('[data-rm-tag]').forEach((b) => {
+      b.onclick = () => { pendingTags.splice(+b.dataset.rmTag, 1); renderTagChips(); };
+    });
+  }
+
+  function addTagFromInput() {
+    const input = $('s-tag-input');
+    const t = normalizeTag(input.value);
+    if (!t) return;
+    if (!pendingTags.includes(t)) pendingTags.push(t);
+    input.value = '';
+    renderTagChips();
+  }
+
   async function loadSettings() {
     const { rf_settings: s } = await chrome.storage.local.get('rf_settings');
     const v = { ...RF.DEFAULTS, ...(s || {}) };
     $('s-intervalMin').value = v.intervalMin;
     $('s-intervalMax').value = v.intervalMax;
     $('s-autoFetchMin').value = v.autoFetchMin;
+    pendingTags = (v.tags || []).map(normalizeTag).filter(Boolean);
+    renderTagChips();
   }
   async function saveSettings() {
     await chrome.storage.local.set({
@@ -166,6 +199,7 @@
         intervalMin: +$('s-intervalMin').value || RF.DEFAULTS.intervalMin,
         intervalMax: +$('s-intervalMax').value || RF.DEFAULTS.intervalMax,
         autoFetchMin: +$('s-autoFetchMin').value || RF.DEFAULTS.autoFetchMin,
+        tags: pendingTags,
       },
     });
     const el = $('settings-result');
@@ -182,6 +216,8 @@
     render();
   };
   $('btn-save-settings').onclick = saveSettings;
+  $('btn-add-tag').onclick = addTagFromInput;
+  $('s-tag-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') addTagFromInput(); });
 
   // ---------- 队列 tab 切换 ----------
   document.querySelectorAll('.tab').forEach((b) => {

@@ -98,6 +98,12 @@
           out.errorText = '今日关注已超过上限(161), 每小时自动探测重试';
           return out;
         }
+        // 160: 对方已在关注列表(或无法关注)——不是故障, 调用方应标 skipped 而非 failed
+        if (errs403.some((e) => e.code === 160)) {
+          out.alreadyFollowing = true;
+          out.errorText = '对方已在关注中(160)';
+          return out;
+        }
         out.errorText = errs403.map((e) => `${e.code} ${e.message}`).join('; ').slice(0, 200);
         if (errs403.some((e) => e.code === 88 || /rate limit/i.test(e.message || ''))) out.rateLimited = true;
         return out;
@@ -200,9 +206,154 @@
     return { url, init };
   }
 
+  // ============================================================
+  // 主动关注(蓝色V互关): 纯逻辑函数
+  // ============================================================
+
+  // SearchTimeline 响应 → 帖子条目 + 翻页游标。
+  // 每条 item: {postId, isRetweet, user:{userId,screenName,name,blue,isProtected,following,followedBy,followers,friends}}
+  // 同一个解析器服务两个阶段: 搜索阶段(原生查询词)与扫描阶段(conversation_id:<帖子ID>), 结构相同。
+  function parseSearchTimeline(body) {
+    const out = { items: [], cursor: null, error: null };
+    let data;
+    try { data = JSON.parse(body); } catch { out.error = '响应不是 JSON: ' + String(body).slice(0, 300); return out; }
+    if (data.errors) { out.error = JSON.stringify(data.errors).slice(0, 500); return out; }
+    const instructions =
+      data?.data?.search_by_raw_query?.search_timeline?.timeline?.instructions || [];
+    if (!instructions.length) {
+      out.error = '搜索响应结构无法解析(可能接口已变), 原始片段: ' + String(body).slice(0, 300);
+      return out;
+    }
+    const pushTweet = (tr) => {
+      if (!tr || tr.__typename === 'TweetTombstone') return; // 已删除的帖子
+      const legacy = tr.legacy || {};
+      const u = tr.core?.user_results?.result || tr.tweet?.core?.user_results?.result;
+      if (!u) return;
+      const uLegacy = u.legacy || u.core?.user_legacy || {};
+      const num = (v) => (Number.isFinite(v) ? v : null);
+      out.items.push({
+        postId: String(tr.rest_id || legacy.id_str || ''),
+        isRetweet: !!(legacy.retweeted_status_result),
+        user: {
+          userId: u.rest_id || u.core?.id_str,
+          screenName: uLegacy.screen_name || u.core?.screen_name || '',
+          name: uLegacy.name || u.core?.name || '',
+          blue: !!u.is_blue_verified,
+          isProtected: !!(uLegacy.protected ?? u.protected),
+          following: !!(u.relationship_perspectives?.following ?? uLegacy.following),
+          followedBy: !!(u.relationship_perspectives?.followed_by ?? uLegacy.followed_by),
+          followers: num(uLegacy.followers_count),
+          friends: num(uLegacy.friends_count),
+        },
+      });
+    };
+    for (const ins of instructions) {
+      for (const e of ins.entries || []) {
+        const id = e.entryId || '';
+        if (id.startsWith('tweet-')) {
+          pushTweet(e.content?.itemContent?.tweet_results?.result);
+        } else if (id.startsWith('profile-conversation-')) {
+          for (const it of e.content?.items || []) {
+            pushTweet(it.item?.itemContent?.tweet_results?.result);
+          }
+        } else if (id.startsWith('cursor-bottom')) {
+          out.cursor = e.content?.value ?? out.cursor;
+        }
+      }
+    }
+    return out;
+  }
+
+  // 求粉特征: 粉丝数/关注数 < RATIO_MAX 才算过; 拿不到计数时不因字段缺失而剔除(返回 true)
+  function passesRatio(followers, friends, ratioMax) {
+    if (!Number.isFinite(followers) || !Number.isFinite(friends)) return true;
+    if (friends <= 0) return followers <= 0; // 不关注别人且有人气 → 不会回关; 两者皆 0 视为过
+    return followers / friends < ratioMax;
+  }
+
+  // 候选人资格: 蓝V + 非保护 + 未关注 + 求粉特征。返回 {ok, reason}(reason 供日志统计)
+  function afEligible(user, ratioMax) {
+    if (!user || !user.userId) return { ok: false, reason: 'no-id' };
+    if (!user.blue) return { ok: false, reason: 'not-blue' };
+    if (user.isProtected) return { ok: false, reason: 'protected' };
+    if (user.following) return { ok: false, reason: 'already-following' };
+    if (!passesRatio(user.followers, user.friends, ratioMax)) return { ok: false, reason: 'ratio' };
+    return { ok: true, reason: null };
+  }
+
+  // 回关优先(逐条): 每取下一个人时先查回关队列, 空了才取主动关注队列。
+  // 只从处于 running 状态的任务取; 都取不到返回 null。
+  function pickNextItem(fbTask, afTask) {
+    if (fbTask && fbTask.state === 'running') {
+      const item = fbTask.queue.find((i) => i.status === 'pending');
+      if (item) return { src: 'fb', item };
+    }
+    if (afTask && afTask.state === 'running') {
+      const item = afTask.queue.find((i) => i.status === 'pending');
+      if (item) return { src: 'af', item };
+    }
+    return null;
+  }
+
+  // 主动关注队列合并: 过滤后的人追加(带 source 标签), 排除:
+  //   已在本队列 / 已在回关队列(exclude 集合, 由调用方用回关队列的 userId 构建)。
+  // 队列总量达 QUEUE_CAP 后停止入队(capped=true, 调用方提示并暂停扫描入队)。
+  // 返回 {added, capped}
+  function mergeAfCandidates(t, users, exclude, cap) {
+    const existing = new Set(t.queue.map((q) => q.userId));
+    let added = 0;
+    let capped = false;
+    for (const u of users) {
+      if (existing.has(u.userId)) continue;
+      if (exclude && exclude.has(u.userId)) continue;
+      if (t.queue.length >= cap) { capped = true; break; }
+      t.queue.push({
+        userId: u.userId, screenName: u.screenName, name: u.name,
+        status: 'pending', error: null,
+        source: u.source || null, addedAt: Date.now(),
+      });
+      existing.add(u.userId);
+      added++;
+    }
+    return { added, capped };
+  }
+
+  // 互关帖池: 按 postId 去重追加新帖(首次发现即视为扫描到期); 返回新增数
+  function upsertPosts(pool, postIds, now) {
+    const seen = new Set(pool.map((p) => p.postId));
+    let added = 0;
+    for (const id of postIds) {
+      if (!id || seen.has(id)) continue;
+      pool.push({ postId: id, firstSeenAt: now, scanCount: 0, lastScanAt: null, nextScanAt: now });
+      seen.add(id);
+      added++;
+    }
+    return { added };
+  }
+
+  // 下一个到期的帖子: scanCount < SCAN_MAX 且 nextScanAt <= now, 按 nextScanAt 最早优先; 没有返回 null
+  function duePost(pool, now, scanMax) {
+    let best = null;
+    for (const p of pool) {
+      if (p.scanCount >= scanMax || p.nextScanAt > now) continue;
+      if (!best || p.nextScanAt < best.nextScanAt) best = p;
+    }
+    return best;
+  }
+
+  // 扫描完成后: 计数+1, 隔 SCAN_INTERVAL_MS 重扫; 到达上限后不再到期(duePost 已滤)
+  function markScanned(post, now, scanIntervalMs) {
+    post.scanCount = (post.scanCount || 0) + 1;
+    post.lastScanAt = now;
+    post.nextScanAt = now + scanIntervalMs;
+    return post;
+  }
+
   globalThis.XFollowBackLogic = {
     localDateStr, rolloverDaily, atName, parseFollowers, interpret,
     mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
     rateLimitBackoffMs, windowExhaustedWaitMs,
+    parseSearchTimeline, passesRatio, afEligible, pickNextItem,
+    mergeAfCandidates, upsertPosts, duePost, markScanned,
   };
 })();
