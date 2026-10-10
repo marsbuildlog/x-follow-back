@@ -434,6 +434,9 @@
   }
 
   // 重放 SearchTimeline, 返回解析结果(429 按 reset 退避重试同一页, 最多3次)
+  // tid 冷却: 同一 x-client-transaction-id 成功后约60秒内 X 拒绝一切同tid请求(404, 空body);
+  // 重放复用捕获的tid, 所以每次发射前必须确保距离"捕获时刻"和"我们上次成功"都过了冷却期
+  let lastSearchOkAt = 0;
   async function searchPage(rawQuery, cursor) {
     const cap = await callPage('list-captured', {});
     const entry = (cap.operations || []).find((o) => o.operationName === OP_SEARCH);
@@ -442,6 +445,13 @@
     if (cursor) variables.cursor = cursor; else delete variables.cursor;
     let retries = 0;
     while (true) {
+      // 冷却基准取两者较晚者: 捕获请求自身的成功时刻(capturedAt) / 我们上一次重放成功时刻
+      const since = Date.now() - Math.max(entry.capturedAt || 0, lastSearchOkAt);
+      if (since < AF.TID_COOLDOWN_MS) {
+        const waitMs = AF.TID_COOLDOWN_MS - since;
+        await log(`同tid冷却中, 等${Math.ceil(waitMs / 1000)}秒后再发`);
+        await sleepSegments(waitMs);
+      }
       const res = await callGraphQL(OP_SEARCH, variables);
       if (res.status === 429) {
         if (++retries > 3) return { rateLimitedOut: true };
@@ -450,14 +460,13 @@
         await sleepSegments(backoff);
         continue;
       }
+      if (res.ok) lastSearchOkAt = Date.now();
       const parsed = parseSearchTimeline(res.body);
       // 非 JSON 响应(空体/错误页)带上状态码, 便于定位
       if (parsed.error) {
         parsed.error = `HTTP ${res.status}: ` + parsed.error;
-        if (res.status === 404) parsed.error += '(请刷新标签页重新捕获后重试)';
-        // 二分定位: 用捕获的原始变量一字不改重放一次——它就是页面刚成功过的同一请求。
-        //   原样重放 200 → 问题在我们修改的变量上(继续对比字节);
-        //   原样重放也 404 → 问题在头/传输层(与 URL 无关)
+        if (res.status === 404) parsed.error += '(同tid冷却未过或参数无效, 冷却已由重放前等待排除——请带日志反馈)';
+        // 对照实验: 原样重放捕获变量。冷却期内它必然也404(字节相同也不例外), 但能区分"传输层完全坏"(连接失败/非404)与"冷却/参数"
         if (res.status === 404) {
           try {
             const retry = await callGraphQL(OP_SEARCH, entry.variables || {});
@@ -467,11 +476,12 @@
           }
         }
         // 失败取证: 模板信息 + 实际请求 URL 分段完整输出(URL 不含凭证, 可安全外发), 便于与页面成功请求逐字节对比
-        const featLen = new URLSearchParams(entry.search || '').get('features')?.length || 0;
-        const hdrKeys = Object.keys(entry.headers || {}).join(',');
-        const tid = entry.headers?.['x-client-transaction-id'] || '';
+        // (entry 来自 list-captured, 无 search 字段, features 长度从实际失败的 URL 上取)
+        const featLen = res.url ? (new URL(res.url).searchParams.get('features') || '').length : 0;
         await log(`搜索失败取证: method=${entry.method} queryId=${entry.queryId} 捕获变量含cursor=${'cursor' in (entry.variables || {})} 发送cursor=${cursor ? '有' : '无'} features长度=${featLen}`);
-        await log(`重放头清单: [${hdrKeys}] tid长度=${tid.length} tid前8=${tid.slice(0, 8)}`);
+        // 重放真实发送状态由 page-hook 回传(list-captured 的 headers 被剥过, 这里不能信它)
+        const s = res.sent || {};
+        await log(`重放实际发送: 头[${(s.headerKeys || []).join(',')}] tid长度=${s.tidLen ?? '?'} tid龄=${s.tidAgeMs != null ? Math.round(s.tidAgeMs / 1000) + '秒' : '?'} csrf长度=${s.csrfLen ?? '?'} URL长度=${(res.url || '').length}`);
         if (res.url) for (let i = 0; i < res.url.length; i += 450) await log(`失败URL[${Math.floor(i / 450) + 1}/${Math.ceil(res.url.length / 450)}]: ${res.url.slice(i, i + 450)}`);
       }
       return parsed;

@@ -228,6 +228,7 @@
         const init = { method: entry.method, credentials: 'include', headers: { ...entry.headers } };
         // 条件请求头/长度头来自原始请求, 重放时变量已变:
         //   if-none-match 命中原缓存会返回 304(空 body), content-length 与新 body 不符可能 400 → 必须剥掉
+        //   注意 x-client-transaction-id 必须保留(实测缺失→404); 它不绑定 URL, 复用最近捕获的即可
         for (const k of ['if-none-match', 'if-modified-since', 'content-length']) delete init.headers[k];
         // csrf 以当前会话 cookie 为准(持久化模板里的可能是旧会话的)
         const csrf = currentCsrf();
@@ -242,9 +243,17 @@
           if (entry.features) bodyObj.features = entry.features; // POST 形态必须带回 features
           init.body = JSON.stringify(bodyObj);
         }
+        // 取证: 如实记录本次重放实际要发送的头(tid 龄 = 捕获到现在的时长), 随结果回传
+        // (list-captured 对外剥头, 隔离世界看到的 headers 是空的——取证必须在这里做才真实)
+        const sent = {
+          headerKeys: Object.keys(init.headers).sort(),
+          tidLen: (init.headers['x-client-transaction-id'] || '').length,
+          tidAgeMs: Math.max(0, Date.now() - entry.capturedAt),
+          csrfLen: (init.headers['x-csrf-token'] || '').length,
+        };
         const res = await origFetch.call(window, url, init);
         const body = await res.text();
-        reply({ status: res.status, ok: res.ok, body, rl: rateLimitHeaders(res), url });
+        reply({ status: res.status, ok: res.ok, body, rl: rateLimitHeaders(res), url, sent });
       } catch (e) {
         reply({ status: -1, ok: false, body: String(e) });
       }
