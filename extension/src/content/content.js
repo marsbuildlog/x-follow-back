@@ -165,7 +165,7 @@
     const m = /^\/hashtag\/([^/?#]+)/.exec(location.pathname);
     return m ? decodeURIComponent(m[1]).replace(/^#/, '').toLowerCase() : null;
   }
-  // 标签页 URL 里没有账号名, 从侧栏账号切换器读当前登录账号; 拿不到退回最近活跃账号
+  // 兑底: 从侧栏账号切换器猜当前账号。多账号登录时可能取到别的账号(ADR-0003), 仅在 whoami 不可用时使用
   function loggedInHandle() {
     const el = document.querySelector('[data-testid="SideNav_AccountSwitcher_AccountSwitcher"]');
     const link = el && el.querySelector('a[href^="/"]');
@@ -173,9 +173,21 @@
     const h = m ? m[1] : '';
     return h && !RESERVED_HANDLES.has(h) ? h : '';
   }
+  // 当前登录账号: 以 X 接口为准(settings.json, hook 缓存10分钟), DOM 猜测与最近活跃仅作兼容兑底。
+  // 多账号登录时侧栏切换器里第一个链接可能是别的账号, 曾把搜索结果写进另一账号的任务键(ADR-0003)
   async function afHandle() {
-    const h = loggedInHandle() || (await store.get(K.active, null)) || '';
-    if (h) await setActive(h);
+    let h = '';
+    try {
+      const r = await callPage('whoami', {});
+      if (r && r.screenName) h = r.screenName;
+    } catch {}
+    if (!h) h = loggedInHandle();
+    if (!h) h = (await store.get(K.active, null)) || '';
+    const prev = await store.get(K.active, null);
+    if (h && h !== prev) {
+      await setActive(h);
+      if (prev) await log(`识别当前账号: @${h}(之前按 @${prev} 记录)`);
+    }
     return h;
   }
 
@@ -1070,10 +1082,10 @@
     const h = curHandle() || (await store.get(K.active, null));
     cachedTask = h ? await getTask(h) : null;
     cachedFetchProgress = await store.get(K.fetchProgress, null);
-    // 主动关注: 仅互关标签页展示; 账号从侧栏读, 拿不到退回最近活跃
+    // 主动关注: 仅互关标签页展示; 账号识别与 afHandle 同链(接口为准, ADR-0003)
     cachedTags = ((await getSettings()).tags) || [];
     const tag = curTag();
-    const ah = tag ? (loggedInHandle() || (await store.get(K.active, null)) || '') : '';
+    const ah = tag ? await afHandle() : '';
     cachedAfHandle = ah;
     cachedAfTask = tag && ah ? await getAfTask(ah) : null;
     cachedAfProgress = await store.get(K.afProgress, null);

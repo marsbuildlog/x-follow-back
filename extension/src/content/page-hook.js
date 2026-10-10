@@ -20,6 +20,7 @@
   const MAX_HISTORY = 50;
   const MAX_RECENT = 80;
   const LS_KEY = '__xfollowback_api_templates'; // POST 类 REST 请求模板持久化(localStorage, x.com 域内)
+  let whoamiCache = null; // {at, name}——当前登录账号, 10分钟缓存(避免每 tick 打一次接口)
 
   // 启动时恢复上次会话捕获的模板(重放时自动刷新 csrf, 过期则靠 403 提示重新捕获)
   try {
@@ -257,6 +258,37 @@
       } catch (e) {
         reply({ status: -1, ok: false, body: String(e) });
       }
+      return;
+    }
+
+    if (msg.type === 'whoami') {
+      // 当前登录账号以接口为准: 多账号登录时侧栏切换器 DOM 里第一个链接可能是别的账号,
+      // 曾把搜索结果写进另一账号的任务键(2026-10-10)。用任一已捕获请求的认证头调 settings.json。
+      (async () => {
+        try {
+          if (whoamiCache && Date.now() - whoamiCache.at < 10 * 60_000) {
+            reply({ status: 200, ok: true, screenName: whoamiCache.name });
+            return;
+          }
+          let headers = null;
+          for (const e of registry.values()) {
+            if (e.headers && Object.keys(e.headers).length) { headers = e.headers; break; }
+          }
+          if (!headers) { reply({ status: -2, ok: false, body: 'no captured headers' }); return; }
+          const init = { method: 'GET', credentials: 'include', headers: { ...headers } };
+          for (const k of ['if-none-match', 'if-modified-since', 'content-length']) delete init.headers[k];
+          const csrf = currentCsrf();
+          if (csrf) init.headers['x-csrf-token'] = csrf;
+          const res = await origFetch.call(window, location.origin + '/i/api/1.1/account/settings.json', init);
+          const body = await res.text();
+          let name = null;
+          try { name = JSON.parse(body).screen_name || null; } catch {}
+          if (res.ok && name) whoamiCache = { at: Date.now(), name };
+          reply({ status: res.status, ok: res.ok, screenName: name, body: res.ok ? undefined : body.slice(0, 200) });
+        } catch (e) {
+          reply({ status: -1, ok: false, body: String(e) });
+        }
+      })();
       return;
     }
 
