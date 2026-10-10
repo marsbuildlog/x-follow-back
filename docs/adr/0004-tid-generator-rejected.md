@@ -44,4 +44,10 @@
   1. **cursor 绑定会话变量基准**(product 等): 翻页跨基准 → `MalformedCursor: Unknown request cursor`;两条传输路径的变量基准统一取 rf_tpl 首见形状
   2. **被 X 完整处理过的失败(如 422 校验)同样启动 tid 冷却计时**(422 后 30s 同 tid → 404 空 body);ADR-0002 的"失败不延长冷却"仅适用 404 空 body(拒绝型)。route1Graphql 对非 404 的 4xx 按"已消耗"记 ok 提前轮换
 - 切换后收益: 扫描/搜索不再依赖"互关标签页开着且本页捕获过 SearchTimeline",浏览器刚重启即可跑
-- 遗留: 池子深度仍靠页面活动供血(自动开页签收割待实现);BlueVerifiedFollowers/回关动作仍走页面重放(后续可同法迁移)
+- 遗留B已实现(2026-10-11): 自动供血——池见底(route1Graphql 无同路径可用 tid)时开**非聚焦独立小窗**收 3 发
+  SearchTimeline(反馈驱动: 每轮等池子真入库再翻页, 8s 不出活提前收工), 完事自关, 70s 冷却后轮换可用;
+  options 控制台有「手动供血」手动档。实施教训: ①后台页签整页加载 5~9s, 盲等 4s 必扑空;
+  ②active:false 页签 visibilityState=hidden, x.com 路由级取数被可见性门控(应用启动但搜索不发)——
+  非聚焦窗口内选中标签 visibility=visible, 不抢焦点照常发请求 ③await 漏写让轮询 Promise
+  恒真值, "106ms 收满 3 发"秒关页面——逐轮诊断字段(rounds/winCreateMs)是抓出它的关键
+- 仍遗留: BlueVerifiedFollowers/回关动作仍走页面重放(后续可同法迁移)
