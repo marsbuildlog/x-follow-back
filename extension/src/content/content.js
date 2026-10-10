@@ -524,7 +524,11 @@
         const cap = await callPage('list-captured', {});
         entry = (cap.operations || []).find((o) => o.operationName === OP_SEARCH);
         if (!entry) return { error: `Route 1 不可用且页面未捕获到 ${OP_SEARCH}——请先打开互关标签页并等它加载完` };
-        const variables = { ...(entry.variables || {}), rawQuery, count: AF.SEARCH_PAGE_SIZE };
+        // 变量基准必须与 Route 1 同源(rf_tpl 首见形状): X 的翻页 cursor 绑定会话基准,
+        // 页1(Route1/如 Latest)的 cursor 拿去页2(页面捕获/如 Top) → MalformedCursor(2026-10-11 实测)
+        const { [K.gqlTpl + ':' + OP_SEARCH]: r1Tpl } = await chrome.storage.local.get(K.gqlTpl + ':' + OP_SEARCH);
+        const base = (r1Tpl && r1Tpl.v0) || entry.variables || {};
+        const variables = { ...base, rawQuery, count: AF.SEARCH_PAGE_SIZE };
         if (cursor) variables.cursor = cursor; else delete variables.cursor;
         searchPath = new URL(entry.url).pathname;
         poolTid = await poolPick(searchPath);
