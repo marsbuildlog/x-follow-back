@@ -447,6 +447,8 @@
         continue;
       }
       const parsed = parseSearchTimeline(res.body);
+      // 非 JSON 响应(空体/错误页)带上状态码, 便于定位(如 304/404/403)
+      if (parsed.error) parsed.error = `HTTP ${res.status}: ` + parsed.error;
       return parsed;
     }
   }
