@@ -9,6 +9,8 @@ const RF = {
     lock: 'rf_lock',
     log: 'rf_log',
     tidPool: 'rf_tid_pool', // tid 收割池(webRequest 被动收集, ADR-0004)
+    gqlTpl: 'rf_tpl',    // 前缀, 实际键 rf_tpl:<op> —— GraphQL 直连模板(Route 1 运输材料)
+    bearer: 'rf_bearer', // 页面 authorization 头(Route 1 直连传输用, bearer 是常量)
     fetchProgress: 'rf_fetch_progress',
     afProgress: 'rf_af_progress', // 主动关注搜索进度(面板展示用)
     active: 'rf_active', // 最近活跃账号(options/popup 无页面上下文时定位任务)

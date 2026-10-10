@@ -244,6 +244,34 @@
   $('quick-handle').addEventListener('input', (e) => { e.target.style.borderColor = '#cbd3d9'; });
   chrome.storage.local.get('rf_active').then(({ rf_active: h }) => { if (h) $('quick-handle').value = h; });
 
+  // ---------- Route 1 直连实验(ADR-0004) ----------
+  // 预填上次旁听到的首见变量形状(rf_tpl:<op>.v0); 发射走 background 的 route1-probe。
+  (async () => {
+    const key = (globalThis.RF.KEY.gqlTpl || 'rf_tpl') + ':SearchTimeline';
+    const { [key]: tpl } = await chrome.storage.local.get(key);
+    if (tpl && tpl.v0) $('r1-vars').value = JSON.stringify(tpl.v0, null, 1);
+  })();
+  $('btn-r1-probe').onclick = async () => {
+    const btn = $('btn-r1-probe'), out = $('r1-out'), verdict = $('r1-verdict');
+    let variables = {};
+    const raw = ($('r1-vars').value || '').trim();
+    if (raw) {
+      try { variables = JSON.parse(raw); } catch (e) { verdict.textContent = 'variables 不是合法 JSON: ' + e.message; return; }
+    }
+    btn.disabled = true;
+    verdict.textContent = '发射中…(连发两发, 各耗一个池内 tid)';
+    let res;
+    try {
+      res = await chrome.runtime.sendMessage({ cmd: 'route1-probe', op: $('r1-op').value.trim(), variables });
+    } catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+    btn.disabled = false;
+    if (!res) res = { ok: false, error: 'background 无响应(SW 刚启动? 重试一次)' };
+    verdict.textContent = res.ok ? '✅ 直连通了(详情见下)' : '❌ 未通过(详情见下)';
+    verdict.style.color = res.ok ? '#1b5e20' : '#b02a37';
+    out.textContent = JSON.stringify(res, null, 2);
+    out.style.display = 'block';
+  };
+
   // ---------- 初始化 ----------
   loadSettings().then(render);
   setInterval(render, 5000);

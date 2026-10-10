@@ -90,6 +90,20 @@
     其余保护机制(限流退避、连续失败熔断、模板过期暂停等)自动运行, 无需配置; 暂停时会发系统通知。
   </div>
 
+  <h2>Route 1 直连实验 <span class="hint">(ADR-0004: background 脱离页面直连)</span></h2>
+  <section>
+    <div class="row">
+      <input id="r1-op" value="SearchTimeline" style="padding:6px 10px;border:1px solid #cbd3d9;border-radius:8px;font-size:13px;width:220px" title="GraphQL operation 名" />
+      <button id="btn-r1-probe" class="ghost">发射对照实验</button>
+      <span id="r1-verdict" class="hint"></span>
+    </div>
+    <div class="hint">用收割材料直接 fetch x.com, 连发两发: ①页面原头集 ②最小三件套(bearer+csrf+tid), 各耗一个池内同路径 tid; 429 即停。⚠️ 任务运行中别点——与循环共享限流桶。</div>
+    <details><summary>本次发射的 variables(自动预填上次旁听到的首见形状)</summary>
+      <textarea id="r1-vars" rows="5" style="width:100%;font:12px/1.5 monospace;border:1px solid #cbd3d9;border-radius:8px;padding:6px"></textarea>
+    </details>
+    <pre id="r1-out" style="display:none;margin-top:8px"></pre>
+  </section>
+
   <h2>日志</h2>
   <details open><summary>展开/收起</summary><pre id="log"></pre></details>
 
