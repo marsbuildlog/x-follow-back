@@ -14,6 +14,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     notify(msg.tag || String(Date.now()), msg.title, msg.message);
     return;
   }
+  if (msg.cmd === 'harvest-boost') {
+    harvestBoost('手动').then((ran) => sendResponse(Object.assign({ ran }, lastBoostDiag))).catch((e) => sendResponse({ ran: false, error: String(e) }));
+    return true;
+  }
   if (msg.cmd === 'route1-graphql') {
     // content 平铺传参(rawQuery/count/cursor 在顶层), 在这里收拢成 query 对象
     route1Graphql(msg.op, { rawQuery: msg.rawQuery, count: msg.count, cursor: msg.cursor })
@@ -82,7 +86,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // ---------- tid 收割池(ADR-0004) ----------
 // MV3 webRequest 纯旁听(不能改写); tid/authorization 是普通请求头, 不需要 extraHeaders。
-importScripts('shared/constants.js', 'shared/route1.js', 'shared/tidpool.js');
+importScripts('shared/constants.js', 'shared/route1.js', 'shared/harvest.js', 'shared/tidpool.js');
 
 const TID_KEY = globalThis.RF.KEY.tidPool;
 let tidWriteInFlight = false;
@@ -202,7 +206,10 @@ async function route1Graphql(op, query) {
   const { [TID_KEY]: pool0 } = await chrome.storage.local.get(TID_KEY);
   let pool = pool0 || [];
   const tidEntry = globalThis.RFTidPool.pick(pool, { path: tpl.p, cooldownMs: RF.AF.TID_COOLDOWN_MS });
-  if (!tidEntry) return { error: '池中无同路径可用 tid(全在冷却)' };
+  if (!tidEntry) {
+    harvestBoost('池见底').catch(() => {}); // 异步供血(本发照常报错走回退, 下几发受益)
+    return { error: '池中无同路径可用 tid(全在冷却)' };
+  }
   // 变量 = 首见形状 + 本次业务参数(rawQuery/count/cursor), 与页面重放同构
   const variables = Object.assign({}, tpl.v0, { rawQuery: query.rawQuery, count: query.count || 20 });
   if (query.cursor) variables.cursor = query.cursor; else delete variables.cursor;
@@ -230,6 +237,95 @@ async function route1Graphql(op, query) {
   await chrome.storage.local.set({ [TID_KEY]: pool });
   return { status: res.status, ok: res.ok, body, rl };
 }
+// ---------- 池子自动供血(ADR-0004 遗留B) ----------
+// 池见底(route1Graphql 无同路径可用 tid)时, 开一个后台搜索页签让页面自己发 SearchTimeline,
+// webRequest 旁听入库; 数发加载攒 2~4 条, 70s 冷却后轮换可用。发完即关页签, 全程无感。
+const HARVEST_KEY = 'rf_harvest_last'; // lastAt 持久化: SW 被杀重启后仍守 90s 间隔, 防页签风暴
+const harvestState = { running: false, tabId: null };
+
+// background 侧写 rf_log(与 content.js log() 同形状, options 日志面板可见)
+async function bgLog(text) {
+  try {
+    const { [RF.KEY.log]: arr } = await chrome.storage.local.get(RF.KEY.log);
+    const list = arr || [];
+    list.push({ ts: Date.now(), text: String(text).slice(0, 500) });
+    while (list.length > 200) list.shift();
+    await chrome.storage.local.set({ [RF.KEY.log]: list });
+  } catch {}
+}
+
+// 返回是否真的发了车(被 running/间隔拦下则 false)。实现用独立小窗而非页签:
+// x.com 的路由级取数有可见性门控——active:false 的页签 visibilityState=hidden, 页面启动但不发
+// SearchTimeline(实测三连扑空); 非聚焦窗口内选中标签的 visibilityState=visible, 照常发请求且不抢焦点。
+async function harvestBoost(reason) {
+  const now = Date.now();
+  const { [HARVEST_KEY]: lastAt } = await chrome.storage.local.get(HARVEST_KEY);
+  if (!globalThis.RFHarvest.shouldRun({ running: harvestState.running, lastAt }, now)) return false;
+  harvestState.running = true;
+  await chrome.storage.local.set({ [HARVEST_KEY]: now });
+  const { [RF.KEY.settings]: settings } = await chrome.storage.local.get(RF.KEY.settings);
+  const url = globalThis.RFHarvest.searchUrl(settings && settings.tags);
+  const startedAt = Date.now();
+  const t0 = Date.now();
+  let winId = null, tabId = null;
+  let got = 0;
+  const diag = { rounds: [], winCreateMs: null, err: null };
+  try {
+    await bgLog(`池子供血(${reason}): 开后台搜索小窗收 ${globalThis.RFHarvest.ROUNDS} 发, 约半分钟后可用`);
+    const wc0 = Date.now();
+    const win = await chrome.windows.create({ url, focused: false, width: 1000, height: 760, top: 40, left: 40 });
+    diag.winCreateMs = Date.now() - wc0;
+    winId = win.id;
+    tabId = harvestState.tabId = win.tabs[0].id;
+    // 反馈驱动: 每轮加载后轮询池子直到真入库一条新 SearchTimeline tid(或超时); 页面不出活就提前收工
+    for (let i = 0; i < globalThis.RFHarvest.ROUNDS; i++) {
+      if (i > 0 && harvestState.tabId != null) {
+        try { await chrome.tabs.reload(tabId); } catch (e) { break; }
+      }
+      const m = await yieldForNewSearchTid(startedAt);
+      diag.rounds.push({ round: i, matched: m ? m.age + "s-old/total" + m.total : false, waitedMs: m ? m.waitedMs : null });
+      if (m) got++;
+      else break;
+    }
+    lastBoostDiag = Object.assign({ ran: got > 0, got, ms: Date.now() - t0, at: Date.now() }, diag);
+    return got > 0;
+  } catch (e) {
+    diag.err = String((e && e.message) || e);
+    lastBoostDiag = Object.assign({ ran: false, got, ms: Date.now() - t0, at: Date.now() }, diag);
+    return false;
+  } finally {
+    if (winId != null) { try { await chrome.windows.remove(winId); } catch {} }
+    harvestState.running = false;
+    harvestState.tabId = null;
+  }
+}
+
+// 最近一次供血诊断(ran/got/耗时/每轮详情), 供 harvest-boost 应答与排查
+let lastBoostDiag = null;
+
+// 轮询池子等新入库的 SearchTimeline tid; 命中时返回 {age, total, waitedMs} 供诊断, 未命中返回 null
+function yieldForNewSearchTid(startedAt) {
+  return new Promise((resolve) => {
+    let waited = 0;
+    const tick = async () => {
+      try {
+        const { [TID_KEY]: pool } = await chrome.storage.local.get(TID_KEY);
+        const m = (pool || []).find((e) => e.p.includes('/SearchTimeline') && e.at >= startedAt);
+        if (m) return resolve({ age: Math.max(0, Date.now() - m.at), total: (pool || []).length, waitedMs: waited });
+      } catch {}
+      waited += globalThis.RFHarvest.POLL_INTERVAL_MS;
+      if (waited >= globalThis.RFHarvest.POLL_MAX_MS) return resolve(null);
+      setTimeout(tick, globalThis.RFHarvest.POLL_INTERVAL_MS);
+    };
+    setTimeout(tick, globalThis.RFHarvest.POLL_INTERVAL_MS);
+  });
+}
+
+// 供血小窗被用户手动关掉时别卡在 running 态
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (harvestState.tabId === tabId) { harvestState.tabId = null; harvestState.running = false; }
+});
+
 // ---------- Route 1 直连对照实验(ADR-0004) ----------
 // (探测: 一次发射最多两发 full→minimal, 各耗一个池内同路径 tid; 实验已过, 循环已切 route1-graphql)
 // 429/网络异常即停(桶热了换头集也无益); 4xx 照发 minimal——若同样失败, 说明问题不在头集(参数/模板层)。

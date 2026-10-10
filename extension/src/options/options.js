@@ -308,6 +308,25 @@
     }
   };
 
+  $('btn-r1-harvest').onclick = async () => {
+    const v = $('r1-verdict');
+    v.textContent = '供血中…(开后台搜索页签收 3 发, 约 15 秒后自动关)';
+    let res;
+    try { res = await chrome.runtime.sendMessage({ cmd: 'harvest-boost' }); } catch (e) { res = { ran: false, error: String(e) }; }
+    if (res && res.ran) {
+      v.textContent = '供血已发车, 等 16s 收尾…';
+      setTimeout(async () => {
+        const { rf_tid_pool: pool } = await chrome.storage.local.get('rf_tid_pool');
+        const n = (pool || []).filter((e) => e.p.includes('SearchTimeline')).length;
+        v.textContent = `✅ 供血完成, SearchTimeline tid 现 ${n} 条(70s 冷却后可用)`;
+        v.style.color = '#1b5e20';
+      }, 16000);
+    } else {
+      v.textContent = '❌ 未发车(90s 内已供过/已在跑): ' + ((res && res.error) || '');
+      v.style.color = '#b02a37';
+    }
+  };
+
   // ---------- 初始化 ----------
   loadSettings().then(render);
   setInterval(render, 5000);
