@@ -4,7 +4,7 @@
 
 > ⚠️ 暂时未申请Chrome Addon Store的权限, 先由安装包的方式来安装, 这种安装属于开发模式
 
-1. 去`https://github.com/marsbuildlog/x-follow-back/releases/x-follow-back-v{x.y.z}.zip` 下载最新版本
+1. 去[release页面](https://github.com/marsbuildlog/x-follow-back/releases/) 下载最新版本文件插件压缩包文件(x-follow-back-v{x.y.z}.zip)
 2. 解压到本地一个安装文件夹
 3. 打开 `chrome://extensions`(Edge: `edge://extensions`)
 4. 右上角开启「开发者模式」
