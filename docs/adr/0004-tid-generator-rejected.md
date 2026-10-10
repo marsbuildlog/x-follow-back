@@ -34,3 +34,14 @@
 - Route 1(脱离 X 标签页跑循环)的 tid 供给=收割池; 运行期无 X 页面时依赖池子存量(每个 tid 60 秒 1 发, 存量 N 个 ≈ N 发/分钟)。
 - manifest 新增 `webRequest` 权限(纯旁听, 不改写)。
 - 生成器路线的重新评估门槛: 上述任一开源库在其最新版能通过同刻对照实验。
+
+## Amendment (2026-10-11): Route 1 已落地——搜索/扫描传输切直连
+
+同刻对照实验通过(options 控制台「Route 1 直连实验」卡片, 分步进度走 rf_r1_probe):
+- full(页面原头+三件套)→ 200;**minimal(bearer + csrf + tid 三件套)→ 也 200**,页面原头非必需
+- 循环迁移: content `searchPage` 优先 `route1-graphql`(background 直连),结构性缺料才回退页面内重放
+- 实施中新发现(均有日志实证):
+  1. **cursor 绑定会话变量基准**(product 等): 翻页跨基准 → `MalformedCursor: Unknown request cursor`;两条传输路径的变量基准统一取 rf_tpl 首见形状
+  2. **被 X 完整处理过的失败(如 422 校验)同样启动 tid 冷却计时**(422 后 30s 同 tid → 404 空 body);ADR-0002 的"失败不延长冷却"仅适用 404 空 body(拒绝型)。route1Graphql 对非 404 的 4xx 按"已消耗"记 ok 提前轮换
+- 切换后收益: 扫描/搜索不再依赖"互关标签页开着且本页捕获过 SearchTimeline",浏览器刚重启即可跑
+- 遗留: 池子深度仍靠页面活动供血(自动开页签收割待实现);BlueVerifiedFollowers/回关动作仍走页面重放(后续可同法迁移)
