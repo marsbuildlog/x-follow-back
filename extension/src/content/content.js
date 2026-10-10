@@ -455,10 +455,21 @@
       if (parsed.error) {
         parsed.error = `HTTP ${res.status}: ` + parsed.error;
         if (res.status === 404) parsed.error += '(请刷新标签页重新捕获后重试)';
-        // 失败取证: 模板信息 + 实际请求 URL(URL 不含凭证, 可安全外发), 便于与页面成功请求逐字节对比
+        // 二分定位: 用捕获的原始变量一字不改重放一次——它就是页面刚成功过的同一请求。
+        //   原样重放 200 → 问题在我们修改的变量上(继续对比字节);
+        //   原样重放也 404 → 问题在头/传输层(与 URL 无关)
+        if (res.status === 404) {
+          try {
+            const retry = await callGraphQL(OP_SEARCH, entry.variables || {});
+            await log(`对照实验: 原样重放捕获请求 → HTTP ${retry.status}, body长度=${(retry.body || '').length}`);
+          } catch (e) {
+            await log(`对照实验异常: ${e}`);
+          }
+        }
+        // 失败取证: 模板信息 + 实际请求 URL 分段完整输出(URL 不含凭证, 可安全外发), 便于与页面成功请求逐字节对比
         const featLen = new URLSearchParams(entry.search || '').get('features')?.length || 0;
         await log(`搜索失败取证: method=${entry.method} queryId=${entry.queryId} 捕获变量含cursor=${'cursor' in (entry.variables || {})} 发送cursor=${cursor ? '有' : '无'} features长度=${featLen}`);
-        if (res.url) await log(`失败URL: ${res.url}`);
+        if (res.url) for (let i = 0; i < res.url.length; i += 450) await log(`失败URL[${Math.floor(i / 450) + 1}/${Math.ceil(res.url.length / 450)}]: ${res.url.slice(i, i + 450)}`);
       }
       return parsed;
     }
