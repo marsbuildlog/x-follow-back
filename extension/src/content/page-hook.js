@@ -20,7 +20,18 @@
   const MAX_HISTORY = 50;
   const MAX_RECENT = 80;
   const LS_KEY = '__xfollowback_api_templates'; // POST 类 REST 请求模板持久化(localStorage, x.com 域内)
-  let whoamiCache = null; // {at, name}——当前登录账号, 10分钟缓存(避免每 tick 打一次接口)
+  let whoamiCache = null; // {at, name}——settings.json 结果, 10分钟正缓存
+  let meName = null;      // {at, name}——从页面自己的 Viewer 响应被动喍探到的登录账号(零额外请求)
+  let settingsFailAt = 0; // settings.json 失败负缓存: 5分钟内不再打该端点(实测会 429)
+
+  // Viewer 响应里就是页面自己认定的登录用户
+  function sniffViewer(text) {
+    try {
+      const r = JSON.parse(text)?.data?.viewer?.results;
+      const name = r?.core?.screen_name || r?.legacy?.screen_name || r?.screen_name;
+      if (name) meName = { at: Date.now(), name };
+    } catch {}
+  }
 
   // 启动时恢复上次会话捕获的模板(重放时自动刷新 csrf, 过期则靠 403 提示重新捕获)
   try {
@@ -143,7 +154,14 @@
       } catch {}
       const p = origFetch.apply(this, arguments);
       if (item) {
-        p.then((res) => { item.status = res && res.status; }).catch(() => { item.status = 'ERR'; });
+        p.then((res) => {
+          item.status = res && res.status;
+          try {
+            if (res && res.ok && item.opName === 'Viewer') {
+              res.clone().text().then(sniffViewer).catch(() => {});
+            }
+          } catch {}
+        }).catch(() => { item.status = 'ERR'; });
       }
       return p;
     };
@@ -173,7 +191,10 @@
         });
       }
     } catch {}
-    if (item) this.addEventListener('loadend', () => { item.status = this.status; });
+    if (item) this.addEventListener('loadend', () => {
+      item.status = this.status;
+      try { if (item.opName === 'Viewer') sniffViewer(this.responseText); } catch {}
+    });
     return origSend.apply(this, arguments);
   };
 
@@ -262,12 +283,20 @@
     }
 
     if (msg.type === 'whoami') {
-      // 当前登录账号以接口为准: 多账号登录时侧栏切换器 DOM 里第一个链接可能是别的账号,
-      // 曾把搜索结果写进另一账号的任务键(2026-10-10)。用任一已捕获请求的认证头调 settings.json。
+      // 当前登录账号: 首选被动喍探的 Viewer 结果(零请求); settings.json 仅作兑底且带5分钟失败负缓存
+      // (实测 settings.json 会整体 429; 多账号登录时侧栏 DOM 里第一个链接可能是别的账号, ADR-0003)
       (async () => {
         try {
+          if (meName && Date.now() - meName.at < 24 * 60 * 60_000) {
+            reply({ status: 200, ok: true, screenName: meName.name });
+            return;
+          }
           if (whoamiCache && Date.now() - whoamiCache.at < 10 * 60_000) {
             reply({ status: 200, ok: true, screenName: whoamiCache.name });
+            return;
+          }
+          if (settingsFailAt && Date.now() - settingsFailAt < 5 * 60_000) {
+            reply({ status: 429, ok: false, body: 'settings.json cooling down' });
             return;
           }
           let headers = null;
@@ -283,7 +312,11 @@
           const body = await res.text();
           let name = null;
           try { name = JSON.parse(body).screen_name || null; } catch {}
-          if (res.ok && name) whoamiCache = { at: Date.now(), name };
+          if (res.ok && name) {
+            whoamiCache = { at: Date.now(), name };
+          } else {
+            settingsFailAt = Date.now();
+          }
           reply({ status: res.status, ok: res.ok, screenName: name, body: res.ok ? undefined : body.slice(0, 200) });
         } catch (e) {
           reply({ status: -1, ok: false, body: String(e) });

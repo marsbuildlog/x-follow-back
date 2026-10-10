@@ -187,22 +187,25 @@
     return h;
   }
   let meCache = { at: 0, name: '' };
-  // 真实登录账号(hook whoami, 缓存10分钟); 拿不到返回空串
+  // 真实登录账号(hook: Viewer喍探优先, settings.json 兑底); 成功正缓存10分钟, 失败负缓存5分钟
   async function whoamiHandle() {
+    if (meCache.name && Date.now() - meCache.at < 10 * 60_000) return meCache.name;
+    if (!meCache.name && Date.now() - meCache.at < 5 * 60_000) return '';
     try {
       const r = await callPage('whoami', {});
       if (r && r.screenName) { meCache = { at: Date.now(), name: r.screenName }; return r.screenName; }
     } catch {}
-    return meCache.name && Date.now() - meCache.at < 10 * 60_000 ? meCache.name : '';
+    meCache = { at: Date.now(), name: '' };
+    return '';
   }
   // 页面 URL 里的 handle → 任务账号: 只有等于真实登录账号才算数。
-  // 逛别人的关注/粉丝列表时 URL 是别人的 handle, 过去会被误认成目标账号,
-  // 把拉取到的粉丝写进别人的任务键(2026-10-10 修复, ADR-0003)
+  // 逛别人的关注/粉丝列表时 URL 是别人的 handle, 过去会被误认成目标账号。
+  // 身份不明时绝不采信 URL handle(宁可退回最近活跃账号)——盲信曾把拉取数据写进别人的键(ADR-0003)
   async function pageHandle() {
     const urlh = curHandle();
     if (!urlh) return '';
     const me = await whoamiHandle();
-    if (!me) return urlh; // whoami 不可用时退回旧行为(兼容)
+    if (!me) return '';
     return urlh.toLowerCase() === me.toLowerCase() ? me : '';
   }
 
@@ -901,11 +904,13 @@
 
   // ---------- 自动恢复 / 自动拉取 / 互关帖扫描观察器 ----------
   async function autoTick() {
-    // URL handle 必须匹配登录账号(逛别人主页时不触发任何自动动作)
+    // 任务归属永久锚定最近活跃账号: 接管/恢复在任意 x.com 页面都能继续;
+    // URL handle 只有匹配登录账号(pageHandle)才用于 setActive/自动拉取(ADR-0003)
     const handle = await pageHandle();
+    const active = handle || (await store.get(K.active, null)) || '';
     if (handle) setActive(handle);
     const tag = curTag();
-    if (!handle && !tag) return;
+    if (!active && !tag) return;
     if (fetchingFollowers || afSearching || afScanning) return;
     const settings = await getSettings();
 
@@ -933,22 +938,22 @@
 
     if (fetchingFollowers) return;
 
-    // 自动拉取: 页面可见 + 距上次拉取(含手动)超过 autoFetchMin 分钟
-    const t0 = await getTask(handle);
-    if (document.visibilityState === 'visible' &&
+    // 自动拉取: 仅在已验证的本账号 followers 页触发(模板在该页捕获); 页面可见 + 距上次拉取超 autoFetchMin 分钟
+    const t0 = await getTask(active);
+    if (document.visibilityState === 'visible' && handle &&
         (!t0.lastFetchAt || Date.now() - t0.lastFetchAt >= settings.autoFetchMin * 60_000)) {
-      if (await acquireLock()) runFetch(handle);
+      if (await acquireLock()) runFetch(active);
       return;
     }
 
-    // 页面刷新后接管中断的任务
+    // 页面刷新后接管中断的任务(锚定 active, 任何页面都能接管)
     if (t0.state === 'running') {
-      if (!loopRunning && !(await isLockMine()) && (await acquireLock())) runLoop(handle);
+      if (!loopRunning && !(await isLockMine()) && (await acquireLock())) runLoop(active);
       return;
     }
     // 暂停到期自动恢复
     if (t0.state === 'paused' && t0.nextAutoResumeAt && Date.now() >= t0.nextAutoResumeAt) {
-      if (await acquireLock()) resumeTask(handle);
+      if (await acquireLock()) resumeTask(active);
     }
   }
   intervals.push(setInterval(autoTick, 30_000));
