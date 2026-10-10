@@ -54,8 +54,8 @@
 
   $('open').onclick = () => chrome.runtime.openOptionsPage();
 
-  // 使用说明(博客项目页)
-  $('guide').onclick = () => chrome.tabs.create({ url: 'https://marsbuildlog.github.io/x-follow-back/' });
+  // 使用说明(仓库 how2use 文档)
+  $('guide').onclick = () => chrome.tabs.create({ url: 'https://github.com/marsbuildlog/x-follow-back/blob/main/docs/how2use.md' });
 
   // 用户名 → 拼接并打开认证粉丝页(新用户只需填自己的用户名)
   const openFollowPage = () => {
