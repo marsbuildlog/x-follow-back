@@ -468,7 +468,10 @@
         }
         // 失败取证: 模板信息 + 实际请求 URL 分段完整输出(URL 不含凭证, 可安全外发), 便于与页面成功请求逐字节对比
         const featLen = new URLSearchParams(entry.search || '').get('features')?.length || 0;
+        const hdrKeys = Object.keys(entry.headers || {}).join(',');
+        const tid = entry.headers?.['x-client-transaction-id'] || '';
         await log(`搜索失败取证: method=${entry.method} queryId=${entry.queryId} 捕获变量含cursor=${'cursor' in (entry.variables || {})} 发送cursor=${cursor ? '有' : '无'} features长度=${featLen}`);
+        await log(`重放头清单: [${hdrKeys}] tid长度=${tid.length} tid前8=${tid.slice(0, 8)}`);
         if (res.url) for (let i = 0; i < res.url.length; i += 450) await log(`失败URL[${Math.floor(i / 450) + 1}/${Math.ceil(res.url.length / 450)}]: ${res.url.slice(i, i + 450)}`);
       }
       return parsed;
