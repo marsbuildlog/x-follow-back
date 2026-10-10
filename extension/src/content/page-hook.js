@@ -251,6 +251,8 @@
         // 条件请求头/长度头来自原始请求, 重放时变量已变:
         //   if-none-match 命中原缓存会返回 304(空 body), content-length 与新 body 不符可能 400 → 必须剥掉
         //   注意 x-client-transaction-id 必须保留(实测缺失→404); 它不绑定 URL, 复用最近捕获的即可
+        // tid 池覆盖(ADR-0004): content.js 若从池里取到同路径且冷却已过的 tid, 优先用它(免等待); 否则用本页捕获的
+        if (msg.payload && msg.payload.tid) init.headers['x-client-transaction-id'] = msg.payload.tid;
         for (const k of ['if-none-match', 'if-modified-since', 'content-length']) delete init.headers[k];
         // csrf 以当前会话 cookie 为准(持久化模板里的可能是旧会话的)
         const csrf = currentCsrf();

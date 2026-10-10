@@ -3,7 +3,7 @@
   "name": "XFollowBack — 自动回关认证粉丝",
   "version": "0.5.1",
   "description": "自动回关 X(Twitter) 认证粉丝, 支持限流退避、每日上限与状态展示",
-  "permissions": ["storage", "notifications", "scripting"],
+  "permissions": ["storage", "notifications", "scripting", "webRequest"],
   "host_permissions": ["https://x.com/*"],
   "content_scripts": [
     {
@@ -26,7 +26,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["src/shared/constants.js", "src/shared/logic.js"],
+      "resources": ["src/shared/constants.js", "src/shared/logic.js", "src/shared/tidpool.js"],
       "matches": ["https://x.com/*"]
     }
   ],

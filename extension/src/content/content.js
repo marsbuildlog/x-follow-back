@@ -18,6 +18,7 @@
   try {
     await import(chrome.runtime.getURL('src/shared/constants.js'));
     await import(chrome.runtime.getURL('src/shared/logic.js'));
+    await import(chrome.runtime.getURL('src/shared/tidpool.js'));
   } catch (e) {
     throw new Error('[XFollowBack] 依赖模块动态加载失败: ' + ((e && e.message) || e));
   }
@@ -234,7 +235,25 @@
       }, 60_000);
     });
   }
-  const callGraphQL = (operationName, variables) => callPage('graphql', { operationName, variables });
+  const callGraphQL = (operationName, variables, tid) => callPage('graphql', { operationName, variables, tid });
+
+  // ---- tid 收割池取用/写回(ADR-0004) ----
+  // 池子由 background SW 的 webRequest 旁听填充(用户刷 X 即持续供血);
+  // 只取同路径且冷却已过的 tid(跨路径未证实); 池子没有则返回 null, 调用方回退捕获 tid + 等冷却。
+  async function poolPick(path) {
+    try {
+      const { [K.tidPool]: pool } = await chrome.storage.local.get(K.tidPool);
+      const e = globalThis.RFTidPool.pick(pool, { path, now: Date.now(), cooldownMs: AF.TID_COOLDOWN_MS });
+      return e ? e.t : null;
+    } catch { return null; }
+  }
+  async function poolMark(tid, path, ok) {
+    if (!tid || !path) return;
+    try {
+      const { [K.tidPool]: pool } = await chrome.storage.local.get(K.tidPool);
+      await chrome.storage.local.set({ [K.tidPool]: globalThis.RFTidPool.markResult(pool, tid, path, ok, Date.now()) });
+    } catch {}
+  }
 
   // ---------- 领导权锁(防止多标签页同时跑任务/重复拉取) ----------
   let myLockToken = null;
@@ -464,8 +483,9 @@
   }
 
   // 重放 SearchTimeline, 返回解析结果(429 按 reset 退避重试同一页, 最多3次)
-  // tid 冷却: 同一 x-client-transaction-id 成功后约60秒内 X 拒绝一切同tid请求(404, 空body);
-  // 重放复用捕获的tid, 所以每次发射前必须确保距离"捕获时刻"和"我们上次成功"都过了冷却期
+  // tid 冷却: 同一 x-client-transaction-id 成功后约60秒内 X 拒绝一切同tid请求(404, 空body)。
+  // tid 来源优先级(ADR-0004): 池子里同路径且冷却已过的 tid(免等待, 池子越深翻页越快)
+  //   → 回退: 等捕获 tid 冷却过后用它(历史行为, 基准=捕获时刻/我们上次成功较晚者)
   let lastSearchOkAt = 0;
   async function searchPage(rawQuery, cursor) {
     const cap = await callPage('list-captured', {});
@@ -475,14 +495,18 @@
     if (cursor) variables.cursor = cursor; else delete variables.cursor;
     let retries = 0;
     while (true) {
-      // 冷却基准取两者较晚者: 捕获请求自身的成功时刻(capturedAt) / 我们上一次重放成功时刻
-      const since = Date.now() - Math.max(entry.capturedAt || 0, lastSearchOkAt);
-      if (since < AF.TID_COOLDOWN_MS) {
-        const waitMs = AF.TID_COOLDOWN_MS - since;
-        await log(`同tid冷却中, 等${Math.ceil(waitMs / 1000)}秒后再发`);
-        await sleepSegments(waitMs);
+      const searchPath = new URL(entry.url).pathname;
+      const poolTid = await poolPick(searchPath);
+      if (!poolTid) {
+        // 冷却基准取两者较晚者: 捕获请求自身的成功时刻(capturedAt) / 我们上一次重放成功时刻
+        const since = Date.now() - Math.max(entry.capturedAt || 0, lastSearchOkAt);
+        if (since < AF.TID_COOLDOWN_MS) {
+          const waitMs = AF.TID_COOLDOWN_MS - since;
+          await log(`同tid冷却中, 等${Math.ceil(waitMs / 1000)}秒后再发`);
+          await sleepSegments(waitMs);
+        }
       }
-      const res = await callGraphQL(OP_SEARCH, variables);
+      const res = await callGraphQL(OP_SEARCH, variables, poolTid);
       if (res.status === 429) {
         if (++retries > 3) return { rateLimitedOut: true };
         const backoff = rateLimitBackoffMs(interpret(res), Date.now(), 15 * 60_000);
@@ -491,6 +515,7 @@
         continue;
       }
       if (res.ok) lastSearchOkAt = Date.now();
+      await poolMark(poolTid, searchPath, res.ok); // 池 tid 写回成败(成功进入冷却, 下次轮换到别的)
       const parsed = parseSearchTimeline(res.body);
       // 非 JSON 响应(空体/错误页)带上状态码, 便于定位
       if (parsed.error) {

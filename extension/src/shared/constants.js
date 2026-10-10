@@ -8,6 +8,7 @@ const RF = {
     afTask: 'rf_af_task', // 前缀, 实际键 rf_af_task:{handle}(主动关注任务: 队列+互关帖池)
     lock: 'rf_lock',
     log: 'rf_log',
+    tidPool: 'rf_tid_pool', // tid 收割池(webRequest 被动收集, ADR-0004)
     fetchProgress: 'rf_fetch_progress',
     afProgress: 'rf_af_progress', // 主动关注搜索进度(面板展示用)
     active: 'rf_active', // 最近活跃账号(options/popup 无页面上下文时定位任务)
@@ -24,7 +25,7 @@ const RF = {
   },
   // 主动关注(蓝色V互关)业务参数——产品决策全部写死为常量, 不进配置页(ADR-0001 语境)
   AF: {
-    SEARCH_MAX_PAGES: 10,    // 搜索阶段每轮最多翻页数
+    SEARCH_MAX_PAGES: 4,     // 搜索阶段每轮最多翻页数(2026-10-10 用户决策: 10→4, 每轮更轻; tid 池轮换后单轮耗时会随池子深度自动缩短)
     SEARCH_PAGE_SIZE: 20,    // 搜索每页条数——必须是 20: SearchTimeline 实测 count≠20 直接 404(2026-10-10 对照实验: 21/40/100 均 404)
     QUEUE_CAP: 10000,        // 主动关注队列容量上限(满了暂停入队)
     RATIO_MAX: 1.2,          // 求粉特征阈值: 粉丝数/关注数 < 1.2 才入队
