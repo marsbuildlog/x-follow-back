@@ -447,8 +447,12 @@
         continue;
       }
       const parsed = parseSearchTimeline(res.body);
-      // 非 JSON 响应(空体/错误页)带上状态码, 便于定位(如 304/404/403)
-      if (parsed.error) parsed.error = `HTTP ${res.status}: ` + parsed.error;
+      // 非 JSON 响应(空体/错误页)带上状态码, 便于定位
+      if (parsed.error) {
+        parsed.error = `HTTP ${res.status}: ` + parsed.error;
+        // 404 = queryId 已被 X 轮换(捕获过期); 模板永远来自页面当下请求, 刷新即恢复
+        if (res.status === 404) parsed.error += '(X 可能已轮换接口 ID——请刷新标签页重新捕获后重试)';
+      }
       return parsed;
     }
   }
