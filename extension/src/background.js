@@ -15,7 +15,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
   if (msg.cmd === 'route1-graphql') {
-    route1Graphql(msg.op, msg.query || {})
+    // content 平铺传参(rawQuery/count/cursor 在顶层), 在这里收拢成 query 对象
+    route1Graphql(msg.op, { rawQuery: msg.rawQuery, count: msg.count, cursor: msg.cursor })
       .then(sendResponse)
       .catch((e) => sendResponse({ error: String((e && e.message) || e) }));
     return true;
@@ -223,7 +224,9 @@ async function route1Graphql(op, query) {
     const v = res.headers && res.headers.get('x-rate-limit-' + k);
     if (v != null && v !== '') rl[k] = Number(v);
   }
-  pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tpl.p, res.ok, Date.now());
+  pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tpl.p, res.ok || res.status !== 404, Date.now());
+  // ↑ 422/429 等"被 X 完整处理过的失败"也会启动 tid 冷却计时(2026-10-11 实测: 422 后 30s 同 tid → 404 空体),
+  //   按"已消耗"记 ok 提前进入冷却换下一条; 404 空 body 才按 ADR-0002 记 fail(不延长冷却)。
   await chrome.storage.local.set({ [TID_KEY]: pool });
   return { status: res.status, ok: res.ok, body, rl };
 }
