@@ -246,30 +246,66 @@
 
   // ---------- Route 1 直连实验(ADR-0004) ----------
   // 预填上次旁听到的首见变量形状(rf_tpl:<op>.v0); 发射走 background 的 route1-probe。
+  // 过程可见: background 每步写 rf_r1_probe, 这里监听 storage 变化现场渲染; sendResponse 只负责终态兑底。
   (async () => {
     const key = (globalThis.RF.KEY.gqlTpl || 'rf_tpl') + ':SearchTimeline';
     const { [key]: tpl } = await chrome.storage.local.get(key);
     if (tpl && tpl.v0) $('r1-vars').value = JSON.stringify(tpl.v0, null, 1);
   })();
+  let r1Running = false;
+  const r1RenderState = (st) => {
+    if (!st || !st.steps) return;
+    const lines = st.steps.map((s) => `[+${(s.at / 1000).toFixed(1)}s] ${s.name}${s.info ? ' — ' + s.info : ''}`);
+    if (st.done) {
+      const { steps, ...rest } = st;
+      lines.push('', 'JSON 结果:', JSON.stringify(rest, null, 2));
+    }
+    const out = $('r1-out');
+    out.textContent = lines.join('\n');
+    out.style.display = 'block';
+    if (st.done) {
+      r1Running = false;
+      $('btn-r1-probe').disabled = false;
+      const v = $('r1-verdict');
+      v.textContent = st.ok ? '✅ 直连通了(详情见下)' : '❌ 未通过(详情见下)';
+      v.style.color = st.ok ? '#1b5e20' : '#b02a37';
+    }
+  };
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.rf_r1_probe) return;
+    r1RenderState(changes.rf_r1_probe.newValue);
+  });
   $('btn-r1-probe').onclick = async () => {
-    const btn = $('btn-r1-probe'), out = $('r1-out'), verdict = $('r1-verdict');
+    if (r1Running) return;
+    r1Running = true;
+    const verdict = $('r1-verdict');
     let variables = {};
     const raw = ($('r1-vars').value || '').trim();
     if (raw) {
-      try { variables = JSON.parse(raw); } catch (e) { verdict.textContent = 'variables 不是合法 JSON: ' + e.message; return; }
+      try { variables = JSON.parse(raw); } catch (e) { verdict.textContent = 'variables 不是合法 JSON: ' + e.message; r1Running = false; return; }
     }
-    btn.disabled = true;
-    verdict.textContent = '发射中…(连发两发, 各耗一个池内 tid)';
-    let res;
-    try {
-      res = await chrome.runtime.sendMessage({ cmd: 'route1-probe', op: $('r1-op').value.trim(), variables });
-    } catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
-    btn.disabled = false;
-    if (!res) res = { ok: false, error: 'background 无响应(SW 刚启动? 重试一次)' };
-    verdict.textContent = res.ok ? '✅ 直连通了(详情见下)' : '❌ 未通过(详情见下)';
-    verdict.style.color = res.ok ? '#1b5e20' : '#b02a37';
-    out.textContent = JSON.stringify(res, null, 2);
-    out.style.display = 'block';
+    $('btn-r1-probe').disabled = true;
+    verdict.textContent = '发射中…(分步进度会实时出现在下方输出区; 每个网络调用 20s 超时, 总兑底 45s)';
+    // 75s 收摊兑底: sendResponse 丢失(如 SW 中途被杀)时不再永久"发射中";
+    // 真实结果可能稍后仍从 rf_r1_probe 补显(上方 watcher 会自己收摊)
+    const res = await Promise.race([
+      (async () => {
+        try { return await chrome.runtime.sendMessage({ cmd: 'route1-probe', op: $('r1-op').value.trim(), variables }); }
+        catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+      })(),
+      new Promise((r) => setTimeout(() => r({ ok: false, timeout: true, error: '75s 无应答——SW 可能在任务中途被杀; 分步进度见下方输出, 真实结果可能稍后自动补上' }), 75_000)),
+    ]);
+    r1Running = false;
+    $('btn-r1-probe').disabled = false;
+    if (!res) {
+      verdict.textContent = '❌ background 无响应——扩展刚重载过? 重试一次';
+      verdict.style.color = '#b02a37';
+      return;
+    }
+    if (!res.timeout) {
+      verdict.textContent = res.ok ? '✅ 直连通了(详情见下)' : '❌ 未通过(详情见下)';
+      verdict.style.color = res.ok ? '#1b5e20' : '#b02a37';
+    }
   };
 
   // ---------- 初始化 ----------

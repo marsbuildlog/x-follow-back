@@ -15,9 +15,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
   if (msg.cmd === 'route1-probe') {
-    route1Probe(msg.op, msg.variables)
+    // 45s 总兑底: SW 里任何环节挂死也保证 options 页拿到应答(分步进度走 rf_r1_probe 实时可见)
+    withTimeout(route1Probe(msg.op, msg.variables), 45_000, '探测总时长')
       .then(sendResponse)
-      .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
+      .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) + '(分步进度见实验卡片输出区)' }));
     return true; // 异步 sendResponse
   }
 });
@@ -154,23 +155,55 @@ chrome.webRequest.onBeforeRequest.addListener(
 // 一次发射最多两发: full(页面原头) → minimal(三件套 bearer+csrf+tid), 各耗一个池内同路径 tid。
 // 意义: ①验证脱离页面的传输层能否 200 ②顺便试出最小头集(为迁移循环定头集)。
 // 429/网络异常即停(桶热了换头集也无益); 4xx 照发 minimal——若同样失败, 说明问题不在头集(参数/模板层)。
+// 可观测性: 每步进度实时写 rf_r1_probe(options 页监听 storage 现场渲染);
+//   每个网络调用带 20s 中断超时——SW 里任何一环挂住都不会让发射永远"发射中"。
+const R1_STATE_KEY = 'rf_r1_probe';
+const R1_FETCH_TIMEOUT_MS = 20_000;
+
+// 竞速超时: 超过 ms 未决则以 label 报错(纯兑底用, 不取消原任务)
+function withTimeout(p, ms, label) {
+  return Promise.race([
+    Promise.resolve(p),
+    new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' 超时(' + Math.round(ms / 1000) + 's)')), ms)),
+  ]);
+}
+
 async function route1Probe(op, variables) {
+  const steps = [];
+  const t0 = Date.now();
+  const step = (name, info) => {
+    steps.push({ at: Date.now() - t0, name, info: info || '' });
+    return chrome.storage.local.set({ [R1_STATE_KEY]: { done: false, steps } }).catch(() => {});
+  };
+  const finish = (result) =>
+    chrome.storage.local.set({ [R1_STATE_KEY]: Object.assign({ done: true, steps }, result) }).catch(() => {});
+
   const tplKey = TPL_PREFIX + op;
+  await step('读模板', op);
   const { [tplKey]: tpl } = await chrome.storage.local.get(tplKey);
-  if (!tpl || !tpl.p) return { ok: false, error: `未旁听到 ${op} 模板——先在 x.com 触发一次该查询, 让 webRequest 旁听到它` };
+  if (!tpl || !tpl.p) { const r = { ok: false, error: `未旁听到 ${op} 模板——先在 x.com 触发一次该查询, 让 webRequest 旁听到它` }; await finish(r); return r; }
+  await step('模板 ✓', `m=${tpl.m} hasSearch=${!!tpl.s} 页面头${Object.keys(tpl.h || {}).length}个`);
   const { [RF.KEY.bearer]: bearer } = await chrome.storage.local.get(RF.KEY.bearer);
-  if (!bearer) return { ok: false, error: 'bearer 未收割——打开 x.com 任意页即可' };
-  const ck = await chrome.cookies.get({ url: 'https://x.com/', name: 'ct0' });
-  if (!ck || !ck.value) return { ok: false, error: '读不到 ct0 cookie——确认已登录 x.com(cookies 权限已申请)' };
+  if (!bearer) { const r = { ok: false, error: 'bearer 未收割——打开 x.com 任意页即可' }; await finish(r); return r; }
+  await step('bearer ✓', `长度${bearer.length}`);
+  await step('读 ct0 cookie');
+  let ck;
+  try {
+    ck = await withTimeout(chrome.cookies.get({ url: 'https://x.com/', name: 'ct0' }), 10_000, 'cookies.get');
+  } catch (e) { const r = { ok: false, error: '读 cookie 异常: ' + String((e && e.message) || e) }; await finish(r); return r; }
+  if (!ck || !ck.value) { const r = { ok: false, error: '读不到 ct0 cookie——确认已登录 x.com' }; await finish(r); return r; }
   const csrf = ck.value;
+  await step('csrf ✓', `长度${csrf.length}`);
 
   const { [TID_KEY]: pool0 } = await chrome.storage.local.get(TID_KEY);
   let pool = pool0 || [];
+  await step('tid 池 ✓', `${pool.length} 条`);
   const attempts = [];
   for (const setName of ['full', 'minimal']) {
     const tidEntry = globalThis.RFTidPool.pick(pool, { path: tpl.p, cooldownMs: RF.AF.TID_COOLDOWN_MS });
     if (!tidEntry) {
       attempts.push({ set: setName, error: '池中无同路径可用 tid(全在冷却)——约70秒后重试, 或先在 x.com 上动一动供血' });
+      await step(`${setName}: 无可用 tid`, '停止');
       break;
     }
     let req, sets;
@@ -179,17 +212,25 @@ async function route1Probe(op, variables) {
       sets = globalThis.RFRoute1.headerSets(tpl.h, bearer, csrf, tidEntry.t, req.isPost);
     } catch (e) {
       attempts.push({ set: setName, error: '构造失败: ' + String((e && e.message) || e) });
+      await step(`${setName} 构造失败`, String((e && e.message) || e));
       break;
     }
-    const t0 = Date.now();
-    let res;
+    await step(`${setName} 发射`, `tid龄${Math.round((Date.now() - tidEntry.at) / 1000)}s 头${Object.keys(sets[setName]).length}个`);
+    const f0 = Date.now();
+    const ac = new AbortController();
+    const kill = setTimeout(() => ac.abort(), R1_FETCH_TIMEOUT_MS);
+    let res, body;
     try {
-      res = await fetch(req.url, { method: req.method, headers: sets[setName], credentials: 'include', body: req.body });
+      res = await fetch(req.url, { method: req.method, headers: sets[setName], credentials: 'include', body: req.body, signal: ac.signal });
+      body = await res.text();
     } catch (e) {
-      attempts.push({ set: setName, error: '网络异常: ' + String((e && e.message) || e) });
+      clearTimeout(kill);
+      const msg = String((e && e.message) || e) + (ac.signal.aborted ? `(>${Math.round(R1_FETCH_TIMEOUT_MS / 1000)}s 无响应, 已中断)` : '');
+      attempts.push({ set: setName, error: '网络异常: ' + msg });
+      await step(`${setName} 网络异常`, msg);
       break;
     }
-    const body = await res.text();
+    clearTimeout(kill);
     const rl = {};
     for (const k of ['limit', 'remaining', 'reset']) {
       const v = res.headers && res.headers.get('x-rate-limit-' + k);
@@ -198,18 +239,21 @@ async function route1Probe(op, variables) {
     let isJson = false;
     try { JSON.parse(body); isJson = true; } catch {}
     attempts.push({
-      set: setName, status: res.status, ok: res.ok, ms: Date.now() - t0,
+      set: setName, status: res.status, ok: res.ok, ms: Date.now() - f0,
       bodyLen: body.length, isJson, head: body.slice(0, 160), rl,
       headers: Object.keys(sets[setName]).sort(),
     });
     pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tpl.p, res.ok, Date.now());
+    await step(`${setName} 返回`, `HTTP ${res.status} ${body.length}B ${Date.now() - f0}ms${res.status === 429 ? '(429 即停)' : ''}`);
     if (res.status === 429) break; // 限流桶热了, 换头集再发只会更糟
   }
   await chrome.storage.local.set({ [TID_KEY]: pool });
-  return {
+  const r = {
     ok: attempts.some((a) => a.ok),
     attempts,
     tpl: { path: tpl.p, q: tpl.q, m: tpl.m, hasFeatures: !!tpl.f, hasSearch: !!tpl.s, hKeys: Object.keys(tpl.h || {}) },
     csrfLen: csrf.length, tidPoolSize: pool.length,
   };
+  await finish(r);
+  return r;
 }
