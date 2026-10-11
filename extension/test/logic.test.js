@@ -550,7 +550,7 @@ test('parseSearchTimeline: 新版 schema——计数取 relationship_counts, 保
 
 // ---------- 池子断供自动补池(ADR-0006) ----------
 const NOW = 1_800_000_000_000;
-const OPTS = { pendingTarget: 50, scanMax: 3, poolMin: 10, cooldownMs: 60 * 60 * 1000 };
+const OPTS = { pendingTarget: 20, scanMax: 3, poolMin: 10, cooldownMs: 60 * 60 * 1000 };
 // 构造 n 个存活帖(scanCount=0), 默认都在两天重扫冷却里(nextScanAt 在未来)
 const alivePosts = (n, overrides = {}) =>
   Array.from({ length: n }, (_, i) => ({ postId: 'p' + i, scanCount: 0, nextScanAt: NOW + 2 * 864e5, ...overrides }));
@@ -590,7 +590,7 @@ test('shouldAutoSearch: 死帖(scanCount≥SCAN_MAX)不计入存活', () => {
 });
 
 test('shouldAutoSearch: 待关注已达水位 → 不触发(需求侧不缺人)', () => {
-  const af = afFixture({ queue: Array.from({ length: 50 }, () => ({ status: 'pending' })) });
+  const af = afFixture({ queue: Array.from({ length: 20 }, () => ({ status: 'pending' })) });
   assert.equal(shouldAutoSearch(af, NOW, OPTS), false);
 });
 

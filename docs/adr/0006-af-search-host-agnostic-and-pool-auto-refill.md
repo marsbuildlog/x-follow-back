@@ -15,7 +15,7 @@ options 页用 `findXTab()` 转发 `af-search` 并携带 `tag`(详情 Tab 新增
 **2. 池子断供自动补池(autoTick, 任一 x.com 页面)。**
 每 tick(30s)检查, 全部满足才触发(纯函数 `shouldAutoSearch` 有单测):
 - 主动关注任务可运行(`running` 或 `done`——`done` 是"列表见底"的主场景; `idle`/`paused` 不代跑);
-- 待关注 < 水位线 `PENDING_TARGET(50)`(需求侧确实缺人);
+- 待关注 < 水位线 `PENDING_TARGET(20)`(需求侧确实缺人; 决策链 2026-10-11 拍 50, 2026-10-12 再拍 50→20);
 - 池子断供: **存活帖(未扫完 scanCount<SCAN_MAX) < `POOL_MIN(10)`** 或 **无到期帖**(当日已扫完/池见底)。
   存活帖才是有效供给——它们哪怕都还在两天重扫冷却里, 供给即将枯竭也直接抓, 不等;
 - 距上次抓取 ≥ `AUTO_SEARCH_COOLDOWN_MS(1h)`。
