@@ -8,9 +8,21 @@
   };
   // 状态 → 文案/圆点色(与页面悬浮控件一致)
   const STATE_TEXT = { idle: '未启动', running: '运行中', done: '等待新粉' };
+  // 智能时刻: 今天只显 HH:mm, 跨天带日期(与控制台 fmtWhen 同款)
+  const fmtWhen = (ts) => {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, '0');
+    const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+    return d.toDateString() === new Date().toDateString() ? hm : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
+  };
 
   async function render() {
-    const { rf_active: h } = await chrome.storage.local.get('rf_active');
+    const r = await chrome.storage.local.get(['rf_active', 'rf_loop_wait']);
+    const h = r.rf_active;
+    const lwRaw = r.rf_loop_wait;
+    const lw = lwRaw && lwRaw.until > Date.now() ? lwRaw : null;
+    const lwText = lw ? ` · ${lw.text}, ${fmtWhen(lw.until)} 前自动继续` : '';
     const dot = $('dot');
     if (!h) {
       $('handle').textContent = '—';
@@ -46,7 +58,7 @@
     const fetching = fp ? ` · 拉取中(第${fp.page}页)` : '';
     const resumeAt = t && t.state === 'paused' && t.nextAutoResumeAt
       ? ` · ${Math.max(0, Math.round((t.nextAutoResumeAt - Date.now()) / 60000))}分钟后自动恢复` : '';
-    $('state').textContent = text + fetching + resumeAt;
+    $('state').textContent = text + fetching + resumeAt + lwText;
     $('pending').textContent = String(pending);
     $('total').textContent = `总数 ${q.length}`;
     $('today').textContent = `今日已回关 ${daily.followed}`;

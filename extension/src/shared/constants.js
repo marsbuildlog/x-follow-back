@@ -14,6 +14,7 @@ const RF = {
     fetchProgress: 'rf_fetch_progress',
     afProgress: 'rf_af_progress', // 主动关注搜索进度(面板展示用)
     active: 'rf_active', // 最近活跃账号(options/popup 无页面上下文时定位任务)
+    loopWait: 'rf_loop_wait', // 循环等待状态落盘(限流重试/窗口用完): 控制台总览可见"系统在等, 不是死了"
   },
   // x.com 前端 JS 内置的公共 bearer(非用户专属, 多年未变, 开源生态普遍内置)。
   // 身份探针(ADR-0005)在收割到动态 bearer 之前兑底; 收割值始终优先。
@@ -28,7 +29,7 @@ const RF = {
     autoFetchMin: 30,     // 自动拉取认证粉丝间隔(分钟, 手动拉取后重新计时)
     tags: [],             // 互关标签列表(Options 页维护; 打开对应标签页才启用主动关注抓取)
   },
-  // 主动关注(蓝色V互关)业务参数——产品决策全部写死为常量, 不进配置页(ADR-0001 语境)
+  // 主动关注(蓝V互关)业务参数——产品决策全部写死为常量, 不进配置页(ADR-0001 语境)
   AF: {
     SEARCH_MAX_PAGES: 4,     // 搜索阶段每轮最多翻页数(2026-10-10 用户决策: 10→4, 每轮更轻; tid 池轮换后单轮耗时会随池子深度自动缩短)
     SEARCH_PAGE_SIZE: 20,    // 搜索每页条数——必须是 20: SearchTimeline 实测 count≠20 直接 404(2026-10-10 对照实验: 21/40/100 均 404)

@@ -22,7 +22,7 @@ test('shouldRun: 从没跑过(lastAt 缺省) → true', () => {
 
 test('searchUrl: 取第一个标签, 去#归一化并编码', () => {
   assert.equal(searchUrl(['蓝V互关', '其他']), 'https://x.com/search?q=' + encodeURIComponent('#蓝V互关') + '&f=live');
-  assert.equal(searchUrl(['#蓝色V互关']), 'https://x.com/search?q=' + encodeURIComponent('#蓝色V互关') + '&f=live');
+  assert.equal(searchUrl(['#蓝V互关']), 'https://x.com/search?q=' + encodeURIComponent('#蓝V互关') + '&f=live');
 });
 
 test('searchUrl: 无标签/空标签退化成通用词 x', () => {

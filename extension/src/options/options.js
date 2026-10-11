@@ -102,18 +102,20 @@
     const [tab, tagTab] = await Promise.all([findXTab(), findTagTab()]);
     renderHost(h, tab);
 
-    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null;
+    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, lw = null;
     if (h) {
       const tk = `rf_task:${h}`, dk = `rf_daily:${h}`, ak = `rf_af_task:${h}`;
-      const r = await chrome.storage.local.get([tk, dk, ak, 'rf_fetch_progress', RF.KEY.afProgress]);
+      const r = await chrome.storage.local.get([tk, dk, ak, 'rf_fetch_progress', RF.KEY.afProgress, RF.KEY.loopWait]);
       fb = r[tk];
       af = r[ak];
       daily = r[dk] && r[dk].date === todayStr() ? r[dk] : { followed: 0 };
       fp = r.rf_fetch_progress;
       afp = r[RF.KEY.afProgress];
+      lw = r[RF.KEY.loopWait] && r[RF.KEY.loopWait].until > Date.now() ? r[RF.KEY.loopWait] : null;
+      loopWaitInfo = lw;
     }
     renderFbCard(h, fb, daily, fp, tab);
-    renderAfCard(h, af, tagTab);
+    renderAfCard(h, af, tagTab, afp);
     renderGuideFb(h, fb, tab);
     renderGuideAf(h, af, tagTab);
     renderFbDetail(h, fb, daily, fp, tab);
@@ -164,13 +166,13 @@
     const tpl = tplCaptured === true ? '✓' : tplCaptured === false ? '⚠' : '';
     el.innerHTML = `
       <h3><span class="dot" style="background:${st.color}"></span>回关任务 ${h ? `<span class="hint">@${esc(h)}</span>` : ''}<button class="more" data-goto="followback">详情 →</button></h3>
-      <div>状态: <b>${esc(st.text)}</b>${fp ? `<span class="hint">${fetchChip}</span>` : ''} ${tpl ? `<span class="hint" title="回关模板">模板${tpl}</span>` : ''}</div>
+      <div>状态: <b>${esc(st.text)}</b>${fp ? `<span class="hint">${fetchChip}</span>` : ''} ${tpl ? `<span class="hint" title="回关模板">模板${tpl}</span>` : ''}${loopWaitChip()}</div>
       <div>待回关 <span class="num">${c.pending}</span> / 总数 ${q.length} · 今日已回关 <span class="num">${daily.followed}</span></div>
       ${h ? taskCardOps('fb', fb, tab) : '<div class="hint">打开 x.com 登录后自动识别账号</div>'}
     `;
   }
 
-  function renderAfCard(h, af, tagTab) {
+  function renderAfCard(h, af, tagTab, afp) {
     const el = $('dash-af');
     const st = stateOf(af);
     const q = (af && af.queue) || [];
@@ -179,11 +181,13 @@
     for (const obj of Object.values((af && af.tags) || {})) {
       for (const p of obj.posts || []) { poolTotal++; if (p.scanCount < RF.AF.SCAN_MAX && p.nextScanAt <= Date.now()) poolDue++; }
     }
+    const searching = !!(afp && afp.running);
+    const grabOK = !!tagTab && !searching;
     el.innerHTML = `
       <h3><span class="dot" style="background:${st.color}"></span>主动关注任务 ${h ? `<span class="hint">@${esc(h)}</span>` : ''}<button class="more" data-goto="activefollow">详情 →</button></h3>
-      <div>状态: <b>${esc(st.text)}</b></div>
+      <div>状态: <b>${esc(st.text)}</b>${searching ? ` <span style="color:#7c3aed;font-weight:700">· 抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>` : ''}${loopWaitChip()}</div>
       <div>待关注 <span class="num">${c.pending}</span> / 队列 ${q.length} · 帖子池 ${poolTotal}${poolDue ? `(待扫 ${poolDue})` : ''}</div>
-      ${h ? taskCardOps('af', af, tagTab) : '<div class="hint">打开 x.com 登录后自动识别账号</div>'}
+      ${h ? taskCardOps('af', af, grabOK) : '<div class="hint">打开 x.com 登录后自动识别账号</div>'}
     `;
   }
 
@@ -221,7 +225,7 @@
     }
     const s1 = tags.length
       ? `${stepMark(true)} <b>配置互关标签</b> — ${tags.map((t) => '#' + esc(t)).join(' ')}(设置 Tab 可改)`
-      : `${stepMark(false)} <b>配置互关标签</b> — <button data-goto="settings" style="margin:0;padding:1px 10px;font-size:12px">去设置添加</button>(如 蓝色V互关)`;
+      : `${stepMark(false)} <b>配置互关标签</b> — <button data-goto="settings" style="margin:0;padding:1px 10px;font-size:12px">去设置添加</button>(如 蓝V互关)`;
     const openBtns = tags.map((t) => `<button class="ghost" style="margin:0;padding:1px 10px;font-size:12px" data-open-tag="${esc(t)}">#${esc(t)}</button>`).join(' ');
     const grab = `<button data-taskop="af-search" ${tagTab ? '' : 'disabled'} style="margin:0;padding:1px 10px;font-size:12px">抓取互关帖</button>`;
     const s2 = poolTotal
@@ -249,6 +253,7 @@
         ` · 总数: ${q.length} · 待回关: ${c.pending} · 今日已回关: ${daily.followed}` +
         (fb.lastFetchAt ? ` · 上次拉取: ${fmtWhen(fb.lastFetchAt)}` : '') +
         ` · 回关模板: ${tplBadge(tplCaptured)}${fetchChip}` +
+        loopWaitChip() +
         (fb.lastError ? `<br>最近错误: <span style="color:#b02a37">${esc(fb.lastError)}</span>` : '');
     }
     // 队列
@@ -300,7 +305,13 @@
       }
     }
     poolRows.sort((a, b) => a.nextScanAt - b.nextScanAt);
-    const searchChip = afp ? ` · <span style="color:#7c3aed;font-weight:700">搜索中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts})</span>` : '';
+    const searching = !!(afp && afp.running);
+    const finishedFresh = afp && afp.running === false && afp.finishedAt && Date.now() - afp.finishedAt < 120_000;
+    const searchChip = searching
+      ? ` · <span style="color:#7c3aed;font-weight:700">抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>`
+      : finishedFresh
+        ? ` · <span style="color:#1b5e20">上轮抓取完成: 帖子${afp.posts ?? '—'}</span>`
+        : '';
 
     if (!h) {
       $('af-state').textContent = '状态: 未识别账号——打开 x.com 登录后自动识别';
@@ -308,10 +319,10 @@
       $('af-state').textContent = `账号: @${h} · 状态: 未启动(先完成引导: 配置标签 → 抓取互关帖)`;
     } else {
       $('af-state').innerHTML =
-        `账号: @${esc(h)} · 状态: <b>${esc(st.text)}</b>` +
+        `账号: @${esc(h)} · 状态: <b>${esc(st.text)}</b>${searchChip}` +
         ` · 队列: ${q.length}(待关注 ${c.pending}) · 帖子池: ${poolTotal}(待扫 ${poolDue})` +
+        loopWaitChip() +
         (af.lastError ? `<br>最近错误: <span style="color:#b02a37">${esc(af.lastError)}</span>` : '');
-      if (afp) $('af-state').innerHTML += searchChip;
     }
 
     // 互关帖池表
@@ -343,12 +354,12 @@
       $('af-queue-table').querySelector('tbody').innerHTML = '';
       $('af-queue-summary').textContent = '';
     }
-    // 按钮状态
+    // 按钮状态(抓取中时禁用抓取, content 侧 afSearching 也有双击拦截)
     const state = (af && af.state) || null;
     $('btn-af-start').disabled = state === 'running';
     $('btn-af-pause').disabled = state !== 'running';
     $('btn-af-resume').disabled = state !== 'paused';
-    $('btn-af-search').disabled = !tagTab;
+    $('btn-af-search').disabled = !tagTab || searching;
     // 逐标签「打开标签页」快捷按钮(与引导卡同源, pendingTags 变化随渲染更新)
     const tagBtns = $('af-tag-buttons');
     tagBtns.innerHTML = pendingTags.length
@@ -406,6 +417,13 @@
       : captured === false
         ? '<span style="color:#b02a37" title="在认证粉丝页列表里点一次任意用户的「回关」, 插件即完成初始化">待初始化 ⚠</span>'
         : '?';
+
+  // 循环静默等待(限流重试/窗口用完)的提示文案: 绝对时刻而非倒计时——总览只在有存储变化时
+  // 重渲染, 倒计时会冻住误导; "15:30 前自动继续"永远诚实
+  let loopWaitInfo = null;
+  const loopWaitChip = () => loopWaitInfo
+    ? ` <span class="hint">· ${esc(loopWaitInfo.text)}, ${fmtWhen(loopWaitInfo.until)} 前自动继续</span>`
+    : '';
 
   // ---------- 操作按钮: 经消息转发给页面内的任务循环 ----------
   async function taskAction(cmd, picker, resultEl, noTabMsg) {

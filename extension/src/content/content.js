@@ -480,7 +480,7 @@
   }
 
   // ============================================================
-  // 主动关注(蓝色V互关): 搜索阶段 + 扫描阶段(生产者, 只在互关标签页运行)
+  // 主动关注(蓝V互关): 搜索阶段 + 扫描阶段(生产者, 只在互关标签页运行)
   //   搜索: 手动触发, 翻页拉互关帖 → 帖子 ID 入互关帖池, 帖子作者入队列
   //   扫描: 到期帖子的回复翻页 → 新评论者/作者入队列; 首扫拉完, 隔两天重扫, 最多三次
   //   两者共用 SearchTimeline 模板(标签页加载时自动捕获), 扫描用 conversation_id: 语法
@@ -628,8 +628,11 @@
     if (afSearching) return { ok: false, message: '已在搜索中' };
     if (!handle) return { ok: false, message: '未识别到登录账号——请确认已登录 x.com' };
     afSearching = true;
+    let done = null; // 结束时留档(running:false + finishedAt), 供控制台显示"上轮抓取完成"
     try {
       await setActive(handle);
+      // 发车即写进度(running:true): 控制台 storage 监听 ~300ms 内亮起"抓取中", 不等首页返回
+      await store.set(K.afProgress, { tag, page: 0, maxPages: AF.SEARCH_MAX_PAGES, posts: 0, running: true });
       await log(`抓取互关帖发车: #${tag}, 最多${AF.SEARCH_MAX_PAGES}页(桶节奏 30s/发; 若遇供血/tid 冷却, 等待原因都会写进日志)`);
       const rawQuery = '#' + tag;
       let cursor = null;
@@ -645,7 +648,7 @@
           if (it.postId) postIds.push(it.postId);
           if (!it.isRetweet) nonRtItems.push(it);
         }
-        await store.set(K.afProgress, { tag, page: page + 1, maxPages: AF.SEARCH_MAX_PAGES, posts: postIds.length });
+        await store.set(K.afProgress, { tag, page: page + 1, maxPages: AF.SEARCH_MAX_PAGES, posts: postIds.length, running: true });
         await log(`搜索第${page + 1}页: 累计帖子${postIds.length}, cursor=${out.cursor ? '有' : '无'}`);
         if (!out.cursor || out.cursor === cursor || out.items.length === 0) break;
         cursor = out.cursor;
@@ -671,6 +674,7 @@
       await log(`搜索完成${incomplete ? '(可能不全)' : ''}: 帖子池+${poolAdded}(共${poolTotal}), 候选+${candOut.added}` +
         `(非蓝V${stats.notBlue}/比值${stats.ratio}/已关注${stats.already}/保护${stats.protected}/转推${stats.retweet})` +
         `, 待关注${pending}`);
+      done = { tag, page, maxPages: AF.SEARCH_MAX_PAGES, posts: postIds.length };
       return {
         ok: true,
         message: `帖子池+${poolAdded}(共${poolTotal}), 候选+${candOut.added}, 待关注${pending}` + (incomplete ? '(可能不全)' : ''),
@@ -680,7 +684,8 @@
       return { ok: false, message: String(e) };
     } finally {
       afSearching = false;
-      await store.set(K.afProgress, null);
+      // 留档而非删除: running:false + finishedAt 让控制台显示"上轮抓取完成", 而不是状态凭空消失
+      await store.set(K.afProgress, Object.assign({ running: false, finishedAt: Date.now() }, done || { tag }));
     }
   }
 
@@ -850,13 +855,19 @@
   // ---------- 主循环(消费者, 两队列一循环见 ADR-0001) ----------
   let loopRunning = false;
   // 循环的静默等待期(429限流/窗口次数用完): 状态仍是 running, 但面板要标出原因与剩余时间,
-  // 否则看起来像挂掉了(2026-10-10 用户反馈)
+  // 否则看起来像挂掉了(2026-10-10 用户反馈)。
+  // 落盘(rf_loop_wait): 总览卡/任务 Tab/弹窗同款展示——用户不看细节也知道"系统在等, 不是死了"
   let loopWait = null;
+  async function setLoopWait(v) {
+    loopWait = v;
+    await store.set(K.loopWait, v || null).catch(() => {});
+  }
   async function runLoop(handle) {
     if (loopRunning || !handle) return;
     if (!(await acquireLock())) return;
     loopRunning = true;
     runningHandle = handle;
+    await setLoopWait(null); // 接手时清掉上个宿主可能残留的旧等待(页签关闭等异常退出)
     // src → 该任务的读写器(回关/主动关注各自的存储键)
     const io = {
       fb: { get: getTask, save: saveTask },
@@ -936,10 +947,10 @@
           // 主动限流: 窗口次数耗尽时等到 reset 再发下一个, 避免吃 429
           const pw = windowExhaustedWaitMs(r, Date.now());
           if (pw > 0) {
-            loopWait = { until: Date.now() + pw, text: '窗口次数用完' };
+            await setLoopWait({ until: Date.now() + pw, text: '窗口次数用完' });
             await log(`本窗口次数已用完(remaining=0), ${Math.round(pw / 1000)}秒后窗口重置自动继续`);
             if (!(await sleepInterruptible(pw, handle))) break;
-            loopWait = null;
+            await setLoopWait(null);
           }
         } else if (r.rateLimited) {
           // B: 429/88 是环境问题不是这个人的问题 → 不标失败不进 stall,
@@ -956,10 +967,10 @@
             rateRetryUserId = null;
           } else {
             const resetTxt = r.rateReset ? ', 窗口 ' + new Date(r.rateReset * 1000).toLocaleTimeString() + ' 重置' : '';
-            loopWait = { until: Date.now() + backoff, text: '限流重试' };
+            await setLoopWait({ until: Date.now() + backoff, text: '限流重试' });
             await log(`限流(${rateRetryCount}/3)${resetTxt}, ${Math.round(backoff / 1000)}秒后重试同一人 ${atName(current)}`);
             if (!(await sleepInterruptible(backoff, handle))) break;
-            loopWait = null;
+            await setLoopWait(null);
           }
         } else if (r.alreadyFollowing) {
           // 160: 对方已在关注列表(或无法关注)——不是故障, 标 skipped 不进失败窗口
@@ -1003,7 +1014,7 @@
     } finally {
       loopRunning = false;
       runningHandle = null;
-      loopWait = null;
+      await setLoopWait(null);
     }
   }
 
