@@ -15,6 +15,9 @@ const RF = {
     afProgress: 'rf_af_progress', // 主动关注搜索进度(面板展示用)
     active: 'rf_active', // 最近活跃账号(options/popup 无页面上下文时定位任务)
   },
+  // x.com 前端 JS 内置的公共 bearer(非用户专属, 多年未变, 开源生态普遍内置)。
+  // 身份探针(ADR-0005)在收割到动态 bearer 之前兑底; 收割值始终优先。
+  publicBearer: 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUro16cIUTA',
   DEFAULTS: {
     intervalMin: 3,       // 关注间隔随机区间下限(秒)
     intervalMax: 8,       // 关注间隔随机区间上限(秒)

@@ -169,11 +169,19 @@
   }
   // 兑底: 从侧栏账号切换器猜当前账号。多账号登录时可能取到别的账号(ADR-0003), 仅在 whoami 不可用时使用
   function loggedInHandle() {
-    const el = document.querySelector('[data-testid="SideNav_AccountSwitcher_AccountSwitcher"]');
-    const link = el && el.querySelector('a[href^="/"]');
+    // 首选: 侧栏/底栏「个人资料」标签——永远指向当前登录账号, 多账号也不误。
+    // ADR-0003 否掉的是账号切换器(第一个链接可能是别的账号), Profile 标签没有这个问题。
+    // settings.json 已 404、Viewer op 已绝迹(见 background 身份探针), 这是页面侧最可靠的身份源。
+    const link = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
     const m = link && /^\/([^/]+)/.exec(link.getAttribute('href') || '');
-    const h = m ? m[1] : '';
-    return h && !RESERVED_HANDLES.has(h) ? h : '';
+    const own = m ? m[1] : '';
+    if (own && !RESERVED_HANDLES.has(own)) return own;
+    // 兼容兑底: 账号切换器(Profile 标签不在时才用, 窄窗口/加载中)
+    const el = document.querySelector('[data-testid="SideNav_AccountSwitcher_AccountSwitcher"]');
+    const link2 = el && el.querySelector('a[href^="/"]');
+    const m2 = link2 && /^\/([^/]+)/.exec(link2.getAttribute('href') || '');
+    const h2 = m2 ? m2[1] : '';
+    return h2 && !RESERVED_HANDLES.has(h2) ? h2 : '';
   }
   // 当前登录账号: 以 X 接口为准(settings.json, hook 缓存10分钟), DOM 猜测与最近活跃仅作兼容兑底。
   // 多账号登录时侧栏切换器里第一个链接可能是别的账号, 曾把搜索结果写进另一账号的任务键(ADR-0003)
@@ -193,11 +201,24 @@
   async function whoamiHandle() {
     if (meCache.name && Date.now() - meCache.at < 10 * 60_000) return meCache.name;
     if (!meCache.name && Date.now() - meCache.at < 5 * 60_000) return '';
+    // 全局闸门(rf_whoami_gate, 与 background 探针共享, 详见 background.js):
+    // settings.json 限额桶极小, 多标签页各自负缓存叠加也会打死它(实测: 认证粉丝页开着时
+    // webRequest 事件高频唤醒 SW → 探针风暴 → 疯狂 429)。闸门跨页/跨进程: 60s 内有人试过
+    // 就不叠; 失败按 retryAt 冷却; 成功 10 分内直接采纳。
+    const g = (await store.get('rf_whoami_gate', null)) || {};
+    const now = Date.now();
+    if (g.ok && now - (g.at || 0) < 10 * 60_000) { meCache = { at: g.at, name: g.name }; return g.name; }
+    if ((g.retryAt && now < g.retryAt) || now - (g.at || 0) < 60_000) return '';
     try {
       const r = await callPage('whoami', {});
-      if (r && r.screenName) { meCache = { at: Date.now(), name: r.screenName }; return r.screenName; }
+      if (r && r.screenName) {
+        meCache = { at: now, name: r.screenName };
+        await store.set('rf_whoami_gate', { at: now, ok: true, name: r.screenName });
+        return r.screenName;
+      }
     } catch {}
-    meCache = { at: Date.now(), name: '' };
+    meCache = { at: now, name: '' };
+    await store.set('rf_whoami_gate', { at: now, ok: false, retryAt: now + 5 * 60_000 });
     return '';
   }
   // 页面 URL 里的 handle → 任务账号: 只有等于真实登录账号才算数。
@@ -990,8 +1011,14 @@
     // 任务归属永久锚定最近活跃账号: 接管/恢复在任意 x.com 页面都能继续;
     // URL handle 只有匹配登录账号(pageHandle)才用于 setActive/自动拉取(ADR-0003)
     const handle = await pageHandle();
-    const active = handle || (await store.get(K.active, null)) || '';
+    let active = handle || (await store.get(K.active, null)) || '';
     if (handle) setActive(handle);
+    if (!active) {
+      // 无 URL handle 的页面(/home 等)也要能建立身份——否则"打开 x.com 完成识别"是死路。
+      // 先问 API(whoami), 再读 DOM(Profile 标签, 零请求), 成功即落盘; 各自自带负缓存/纯同步, 不会扛接口
+      const me = (await whoamiHandle()) || loggedInHandle();
+      if (me) { await setActive(me); active = me; }
+    }
     const tag = curTag();
     if (!active && !tag) return;
     if (fetchingFollowers || afSearching || afScanning) return;
@@ -1042,58 +1069,44 @@
   intervals.push(setInterval(autoTick, 30_000));
   autoTick();
 
-  // ---------- PoC 单点测试 ----------
-  async function testFollowOne(handle) {
-    const t = await getTask(handle);
-    const item = t.queue.find((i) => i.status === 'pending');
-    if (!item) return { ok: false, message: '队列里没有待回关用户(先拉取粉丝或启动任务)' };
-    let res;
-    try {
-      res = await followUser(item.userId);
-    } catch (e) {
-      return { ok: false, message: String(e) };
-    }
-    const r = interpret(res);
-    if (r.ok) {
-      item.status = 'done';
-      item.doneAt = Date.now();
-      item.error = null;
-      await saveTask(handle, t);
-      const d = await getDaily(handle);
-      d.followed++;
-      await store.set(dailyKey(handle), d);
-      await log(`[PoC] 已关注 ${atName(item)}`);
-      return { ok: true, message: `成功关注 ${atName(item)}`, raw: res };
-    }
-    item.status = 'failed';
-    item.error = r.errorText;
-    t.lastError = r.errorText;
-    await saveTask(handle, t);
-    await log(`[PoC] 关注失败 ${atName(item)}: ${r.errorText}`);
-    return { ok: false, message: r.errorText, raw: res };
-  }
-
   // ---------- options 页消息入口 ----------
+  // 控制台已改 storage 直读(与 popup 同法), 这里只保留两件只有页面才知道的事:
+  //   tpl-captured: 回关模板是否已捕获(MAIN world 的捕获记录); 页面早于插件安装/重载打开时是孤儿,
+  //                 无响应 → 控制台会用 scripting API 补注入自愈
+  //   reset-task:   清任务(经由页面保证运行中循环下一拍即见空; 页面不可达时控制台直接清 storage)
   msgHandler = (msg, sender, sendResponse) => {
     if (halted) return false; // 孤儿不响应也不占通道, 让新注入的实例接管
     (async () => {
       try {
         const h = await activeHandle();
         switch (msg && msg.cmd) {
-          case 'ping': sendResponse({ ok: true }); break;
-          case 'get-task': {
-            const t = h ? { ...(await getTask(h)), daily: await getDaily(h) } : null;
-            if (t) {
-              try {
-                const cap = await callPage('list-captured', {});
-                t.templateCaptured = (cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API);
-              } catch { t.templateCaptured = null; }
-            }
-            sendResponse(t);
+          case 'tpl-captured': {
+            let captured = null;
+            try {
+              const cap = await callPage('list-captured', {});
+              captured = (cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API);
+            } catch {}
+            sendResponse({ captured });
             break;
           }
+          case 'start-task':
+            if (!h) { sendResponse({ ok: false, message: '未识别到登录账号——先打开 x.com 完成识别' }); break; }
+            sendResponse(await startTask(h));
+            break;
+          case 'pause-task':
+            if (!h) { sendResponse({ ok: false, message: '未识别到登录账号' }); break; }
+            await pauseTask(h, 'manual');
+            sendResponse({ ok: true, message: '已暂停' });
+            break;
+          case 'resume-task':
+            if (!h) { sendResponse({ ok: false, message: '未识别到登录账号' }); break; }
+            await resumeTask(h);
+            sendResponse({ ok: true, message: '已恢复' });
+            break;
+          case 'refresh-list':
+            sendResponse(await requestRefresh());
+            break;
           case 'reset-task': await store.set(taskKey(h), null); sendResponse({ ok: true }); break;
-          case 'test-follow-one': sendResponse(await testFollowOne(h)); break;
           default: sendResponse({ ok: false, message: 'unknown cmd' });
         }
       } catch (e) {
@@ -1237,20 +1250,15 @@
     const loopWaitHint = loopWait
       ? ` · ${loopWait.text}, 约${Math.max(1, Math.ceil((loopWait.until - Date.now()) / 60000))}分钟后继续` : '';
     const fetchInfo = cachedFetchProgress ? ` · 第${cachedFetchProgress.page}页/累计${cachedFetchProgress.users}人` : '';
-    const actionBtn = t.state === 'running'
-      ? `<button class="rf-btn primary" data-act="pause">暂停</button>`
-      : t.state === 'paused'
-        ? `<button class="rf-btn ${st.alert ? 'warn' : 'primary'}" data-act="resume">恢复</button>`
-        : `<button class="rf-btn primary" data-act="start">开始回关</button>`;
     panel.innerHTML = `
       <div class="rf-head"><strong>XFollowBack</strong><span>@${escHtml(t.screenName) || '—'}</span></div>
       <div class="rf-status"><span class="dot" style="background:${st.color}"></span>${st.text}${pauseHint}${loopWaitHint}${fetchInfo}</div>
       <div class="rf-nums">总数 <b>${total}</b> · 待回关 <b>${pending}</b></div>
       ${cachedTemplateCaptured === false ? `<div class="rf-guide">首次使用: 请在下方列表中手动点一次任意用户的「回关」按钮, 插件即可学会自动回关(只需一次)</div>` : ''}
-      ${st.alert ? `<div class="rf-alert">回关模板已过期——请在本列表点一次 X 的「回关」按钮, 再点「恢复」</div>` : ''}
+      ${st.alert ? `<div class="rf-alert">回关模板已过期——请在列表点一次「回关」, 插件会自动恢复</div>` : ''}
       ${panelMsg ? `<div class="rf-msg">${escHtml(panelMsg)}</div>` : ''}
       ${t.lastError ? `<div class="rf-err">最近错误: ${escHtml(t.lastError).slice(0, 160)}</div>` : ''}
-      <div class="rf-btns">${actionBtn}<button class="rf-btn ghost" data-act="refresh">更新列表</button></div>
+      <div class="rf-btns"><button class="rf-btn ghost" data-act="console">打开控制台</button></div>
       <div class="rf-keep">⏳ 任务在此页面内运行, 请保持标签页开启——关闭后会暂停, 重新打开会自动继续</div>
     `;
   }
@@ -1359,11 +1367,22 @@
     }
     // 每5秒检查一次回关模板捕获状态(捕获发生在 MAIN world 内存, storage 变化感知不到)
     if (++tplTick % 5 === 1 || cachedTemplateCaptured == null) {
-      callPage('list-captured', {}).then((cap) => {
+      callPage('list-captured', {}).then(async (cap) => {
         const v = !!(cap && (cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API));
         if (v !== cachedTemplateCaptured) {
           cachedTemplateCaptured = v;
-          if (v && panelOpen) setPanelMsg('✓ 模板已捕获, 可以点「开始回关」了');
+          if (v) {
+            if (panelOpen) setPanelMsg('✓ 模板已捕获');
+            // 模板过期暂停后的自动恢复: 用户刚在列表里点了一次「回关」, 不必再去找「恢复」按钮
+            try {
+              const h = await activeHandle();
+              const t = h && (await getTask(h));
+              if (t && t.state === 'paused' && t.pauseReason === 'template-expired') {
+                await resumeTask(h);
+                await log('模板已刷新, 自动恢复任务');
+              }
+            } catch {}
+          }
           renderWidget();
         }
       }).catch(() => {});
@@ -1377,6 +1396,7 @@
         const act = ev.target && ev.target.dataset && ev.target.dataset.act;
         if (act) {
           ev.preventDefault(); ev.stopPropagation();
+          if (act === 'console') { sendBg({ cmd: 'open-options' }); return; }
           // 标签页 URL 没有账号名, 异步解析(侧栏读取, 退回最近活跃)
           const tag = curTag();
           const taskHandle = tag ? afHandle() : pageHandle();

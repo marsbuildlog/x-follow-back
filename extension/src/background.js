@@ -7,6 +7,7 @@
 //      (扩展重启后所有旧 content script 变孤儿, 页面必须刷新才能重新注入;
 //       其余 x.com 页不刷, 避免丢失页面内状态如草稿)
 //   2. 代理系统通知(chrome.notifications 仅扩展页面可用, content script 无权调用)
+//   4. 身份探针(ADR-0005): 免输入识别登录账号, ct0+公共 bearer → settings.json → rf_active
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg) return;
@@ -16,6 +17,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg.cmd === 'harvest-boost') {
     harvestBoost('手动').then((ran) => sendResponse(Object.assign({ ran }, lastBoostDiag))).catch((e) => sendResponse({ ran: false, error: String(e) }));
+    return true;
+  }
+  if (msg.cmd === 'open-options') {
+    chrome.runtime.openOptionsPage();
+    return;
+  }
+  if (msg.cmd === 'identity-probe') {
+    identityProbe().then((ok) => sendResponse({ ok }));
+    return true;
+  }
+  if (msg.cmd === 'follow-probe') {
+    withTimeout(followProbe(msg.handle), 60_000, '回关直连实验')
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
     return true;
   }
   if (msg.cmd === 'route1-graphql') {
@@ -31,6 +46,139 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) + '(分步进度见实验卡片输出区)' }));
     return true; // 异步 sendResponse
+  }
+});
+
+// ---------- 身份探针(ADR-0005): 免输入识别登录账号 ----------
+// 读 ct0 cookie + bearer(收割优先/公共兑底) → settings.json 取 screen_name → rf_active。
+// settings.json 实测会 429(极小限额桶)甚至 404(拒绝无 tid 的调用), 任何叠加尝试都会打成风暴:
+// 全局闸门 rf_whoami_gate(storage, 与页面 whoami 链共享)——
+//   MV3 SW 被 x.com 的 webRequest 事件高频唤醒, 内存态冷却跨不过重启(实测: 认证粉丝页开着时
+//   每次 SW 唤醒都裸发一发 settings.json → 疯狂 429)。闸门跨重启/跨标签页生效:
+//   60s 内任何一方刚试过就不叠; 失败按 retryAt 冷却(429 用服务端窗口, 其余 5 分); 成功 10 分内直接采纳。
+const IDENTITY_OK_MS = 10 * 60_000;
+const IDENTITY_FAIL_MS = 5 * 60_000;
+const GATE_KEY = 'rf_whoami_gate';
+const identityState = { ok: false, at: 0 };
+
+async function hasActive() {
+  const { rf_active: cur } = await chrome.storage.local.get('rf_active').catch(() => ({}));
+  return !!cur;
+}
+async function gateWrite(v) {
+  await chrome.storage.local.set({ [GATE_KEY]: v }).catch(() => {});
+}
+// 落盘识别结果(探针自发或采纳页面侧成功, 同一次成功不重复发请求)
+async function adoptHandle(name, via) {
+  if (!name) return;
+  const { rf_active: prev } = await chrome.storage.local.get('rf_active');
+  if (prev !== name) {
+    await chrome.storage.local.set({ rf_active: name });
+    bgLog(prev ? `身份探针: 当前登录账号 @${name}(之前按 @${prev})` : `身份探针: ${via}识别登录账号 @${name}`);
+  }
+}
+
+// ---------- HTML 身份源(settings.json 的替代水源) ----------
+// X 前端自身已不从 API 拿登录身份(Viewer op 绝迹、viewer_context.json 空体、settings.json 404/429),
+// 身份只能在页面 SSR HTML 里。锚点: twid cookie(数字 uid) ↔ HTML 中同 uid 用户对象的 screen_name——
+// 双重匹配, 不会误认成时间线上别的用户。页面能登上, 这条链就能识别。
+async function identityFromHtml() {
+  const tw = await chrome.cookies.get({ url: 'https://x.com/', name: 'twid' }).catch(() => null);
+  const uid = tw && tw.value ? decodeURIComponent(tw.value).replace(/^u=/, '') : null;
+  if (!uid || !/^\d+$/.test(uid)) return { ok: false, reason: '无 twid cookie(或形状变了)' };
+  const res = await fetch('https://x.com/home', { method: 'GET', credentials: 'include' });
+  if (!res.ok) return { ok: false, reason: 'home HTML HTTP ' + res.status };
+  const html = await res.text();
+  // 用户对象内 id 与 screen_name 距离很近, 两种 id 序列化(GraphQL rest_id / v1.1 实体 id_str)、两种键序都试
+  const m = html.match(new RegExp('"rest_id":"' + uid + '"[\\s\\S]{0,600}?"screen_name":"([A-Za-z0-9_]{1,15})"'))
+          || html.match(new RegExp('"screen_name":"([A-Za-z0-9_]{1,15})"[\\s\\S]{0,600}?"rest_id":"' + uid + '"'))
+          || html.match(new RegExp('"screen_name":"([A-Za-z0-9_]{1,15})","id_str":"' + uid + '"'))
+          || html.match(new RegExp('"id_str":"' + uid + '"[\\s\\S]{0,300}?"screen_name":"([A-Za-z0-9_]{1,15})"'));
+  if (!m) {
+    // 诊断: 锚点没中, 把候选分布摸清供下一轮迭代(上下文截段 + 各种 id/名字的序列化形式)
+    const ctx = [];
+    for (const mm of html.matchAll(/"screen_name":"([A-Za-z0-9_]{1,15})"/g)) {
+      ctx.push(html.slice(Math.max(0, mm.index - 120), mm.index + 80).replace(/\s+/g, ' '));
+    }
+    return {
+      ok: false,
+      reason: 'HTML 中未找到 twid 匹配的用户对象',
+      diag: {
+        hasMyRestId: html.includes('"rest_id":"' + uid + '"'),
+        idStr: html.includes('"id_str":"' + uid + '"'),
+        bareId: html.includes(':' + uid + '[,}]') || html.includes('"userId":"' + uid + '"'),
+        screenNameCount: (html.match(/"screen_name":"/g) || []).length,
+        screenNameCtx: ctx.slice(0, 3),
+        camelCase: [...html.matchAll(/"screenName":"([A-Za-z0-9_]{1,15})"/g)].map((x) => x[1]).slice(0, 5),
+      },
+    };
+  }
+  return { ok: true, name: m[1], uid };
+}
+
+async function identityProbe() {
+  const now = Date.now();
+  const g = await chrome.storage.local.get(GATE_KEY).then((o) => o[GATE_KEY] || {}).catch(() => ({}));
+  if (identityState.ok && now - identityState.at < IDENTITY_OK_MS) return true; // 内存快路径
+  if (g.ok && now - (g.at || 0) < IDENTITY_OK_MS) {
+    // 页面 whoami 链刚识别成功: 直接采纳
+    identityState.ok = true;
+    identityState.at = g.at;
+    await adoptHandle(g.name, '采纳页面识别, ');
+    return true;
+  }
+  if ((g.retryAt && now < g.retryAt) || now - (g.at || 0) < 60_000) return false; // 冷却中/刚试过
+  identityState.at = now;
+  try {
+    const ck = await chrome.cookies.get({ url: 'https://x.com/', name: 'ct0' });
+    if (!ck || !ck.value) {
+      await gateWrite({ at: now, ok: false, retryAt: now + IDENTITY_FAIL_MS });
+      return false; // 未登录: 等 whoami 链接管
+    }
+    // 水源① settings.json(便宜, 但实测常 404/429)
+    const { [RF.KEY.bearer]: harvested } = await chrome.storage.local.get(RF.KEY.bearer);
+    const auth = harvested || globalThis.RF.publicBearer;
+    const res = await fetch('https://x.com/i/api/1.1/account/settings.json', {
+      method: 'GET',
+      credentials: 'include',
+      headers: { authorization: auth, 'x-csrf-token': ck.value },
+    });
+    let name = null;
+    if (res.ok) {
+      name = ((await res.json().catch(() => null)) || {}).screen_name;
+      if (name && /^[A-Za-z0-9_]{1,15}$/.test(name)) {
+        await gateWrite({ at: now, ok: true, name });
+        identityState.ok = true;
+        await adoptHandle(name, '');
+        return true;
+      }
+    }
+    // 水源② HTML 内嵌身份(重但稳: 页面能登上就识别得出)
+    const html = await identityFromHtml();
+    if (html.ok) {
+      await gateWrite({ at: now, ok: true, name: html.name });
+      identityState.ok = true;
+      await adoptHandle(html.name, 'HTML水源, ');
+      return true;
+    }
+    // 双水源都失败: 按 settings.json 的状态定冷却(429 用服务端窗口, 其余 5 分)
+    const resetSec = Number(res.headers && res.headers.get('x-rate-limit-reset'));
+    const retryAt = Number.isFinite(resetSec) && resetSec > now / 1000 ? resetSec * 1000 : now + IDENTITY_FAIL_MS;
+    await gateWrite({ at: now, ok: false, retryAt });
+    bgLog(`身份探针失败: settings.json HTTP ${res.status} + HTML水源(${html.reason}${html.diag ? ' ' + JSON.stringify(html.diag) : ''}), ${new Date(retryAt).toLocaleTimeString()} 后重试`);
+    return false;
+  } catch {
+    await gateWrite({ at: Date.now(), ok: false, retryAt: Date.now() + IDENTITY_FAIL_MS });
+    return false;
+  }
+}
+
+// 换号/重登会换 auth_token: 限额桶跟着账号走, 闸门与探针缓存一并作废
+chrome.cookies.onChanged.addListener((info) => {
+  if (info.cookie.name === 'auth_token' && (info.cookie.domain || '').includes('x.com')) {
+    identityState.ok = false;
+    identityState.at = 0;
+    chrome.storage.local.remove(GATE_KEY).catch(() => {});
   }
 });
 
@@ -87,6 +235,76 @@ chrome.runtime.onInstalled.addListener(() => {
 // ---------- tid 收割池(ADR-0004) ----------
 // MV3 webRequest 纯旁听(不能改写); tid/authorization 是普通请求头, 不需要 extraHeaders。
 importScripts('shared/constants.js', 'shared/route1.js', 'shared/harvest.js', 'shared/tidpool.js');
+
+// ---------- 回关动作直连实验(Phase 2 闸门): create.json 能否脱离页面 ----------
+// 步骤: UserByScreenName 拿 user_id(需页面旁听过该模板) → create(净加一) → 立即 destroy(净零)。
+// 变体: ①最小头(bearer+csrf, 无 tid) ②加池内最新 tid(跨路径——池里天然没有 create.json 的 tid)。
+// 结果决定: 回关是否还依赖页面重放(问题2) + 循环能否搬进后台(关掉所有 x.com 页也能跑)。
+async function v11Call(action, userId, tid) {
+  const { [RF.KEY.bearer]: harvested } = await chrome.storage.local.get(RF.KEY.bearer);
+  const auth = harvested || globalThis.RF.publicBearer;
+  const ck = await chrome.cookies.get({ url: 'https://x.com/', name: 'ct0' });
+  if (!ck || !ck.value) return { error: '读不到 ct0 cookie' };
+  const headers = {
+    authorization: auth,
+    'x-csrf-token': ck.value,
+    'content-type': 'application/x-www-form-urlencoded',
+  };
+  if (tid) headers['x-client-transaction-id'] = tid;
+  const res = await fetch('https://x.com/i/api/1.1/friendships/' + action + '.json', {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: 'user_id=' + encodeURIComponent(userId),
+  });
+  const body = await res.text();
+  return { status: res.status, ok: res.ok, body: body.slice(0, 200) };
+}
+
+async function followProbe(handle) {
+  const h = String(handle || '').trim().replace(/^@/, '');
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(h)) return { ok: false, error: 'handle 不合法' };
+  // 1. user_id: UserByScreenName 走 Route 1(模板需页面旁听过一次)
+  const u = await route1Graphql('UserByScreenName', { screen_name: h });
+  let userId = null;
+  if (u && u.ok) {
+    try { userId = JSON.parse(u.body).data.user.result.rest_id; } catch {}
+  }
+  if (!userId) {
+    return { ok: false, error: `拿不到 @${h} 的 user_id(${u && u.error ? u.error : 'HTTP ' + (u && u.status)})——先在 x.com 打开一次该用户的主页(让页面旁听到模板)再重试` };
+  }
+  // 2. create→destroy, 两种头形态逐个试(成功即停; 429 桶热即停)
+  const { [TID_KEY]: pool } = await chrome.storage.local.get(TID_KEY);
+  const tidEntry = (pool || []).slice().sort((a, b) => b.at - a.at)[0];
+  const attempts = [];
+  for (const [label, tid] of [['无tid', null], ['带池内tid(跨路径)', tidEntry && tidEntry.t]]) {
+    const a = { set: label, tid: tid ? `龄${Math.round((Date.now() - tidEntry.at) / 1000)}s` : null };
+    const c = await v11Call('create', userId, tid);
+    a.create = c.status != null ? `HTTP ${c.status}` : c.error;
+    if (c.ok) {
+      const d = await v11Call('destroy', userId, tid);
+      a.destroy = d.status != null ? `HTTP ${d.status}` : d.error;
+      a.netZero = d.ok;
+    } else {
+      a.body = c.body;
+    }
+    attempts.push(a);
+    if (a.netZero || c.status === 429) break;
+  }
+  const win = attempts.find((a) => a.netZero);
+  return {
+    ok: !!win,
+    userId,
+    attempts,
+    verdict: win
+      ? `✅ 直连可用(${win.set})——回关可脱页, Phase 2 闸门通过`
+      : '❌ 无可用形态——回关暂留页面重放, 循环仍需页面宿主',
+  };
+}
+
+// SW 冷启动仅在无活跃账号时探一次(识别是最贵状态; 已识别的靠 popup/控制台打开时保鲜)。
+// 闸门在 storage, 跨重启生效——即使触发也只是读一次闸门, 不会叠发请求
+if (!hasActive()) identityProbe().catch(() => {});
 
 const TID_KEY = globalThis.RF.KEY.tidPool;
 let tidWriteInFlight = false;

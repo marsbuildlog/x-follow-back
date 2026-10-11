@@ -12,9 +12,11 @@
   async function render() {
     const { rf_active: h } = await chrome.storage.local.get('rf_active');
     const dot = $('dot');
+    // 按钮标签随识别状态分流: 已识别 → 直达认证粉丝页; 未识别 → 引导开 x.com 完成识别
+    $('btn-open-vf').textContent = h ? '打开认证粉丝页' : '打开 x.com 完成识别';
     if (!h) {
       $('handle').textContent = '—';
-      $('state').textContent = '未启动(先打开 x.com 认证粉丝页)';
+      $('state').textContent = '未识别账号——打开 x.com 登录后自动识别';
       $('pending').textContent = '–';
       $('total').textContent = '';
       $('today').textContent = '';
@@ -57,20 +59,16 @@
   // 使用说明(仓库 how2use 文档)
   $('guide').onclick = () => chrome.tabs.create({ url: 'https://github.com/marsbuildlog/x-follow-back/blob/main/docs/how2use.md' });
 
-  // 用户名 → 拼接并打开认证粉丝页(新用户只需填自己的用户名)
-  const openFollowPage = () => {
-    const name = ($('quick-handle').value || '').trim().replace(/^@/, '');
-    if (!/^[A-Za-z0-9_]{1,15}$/.test(name)) {
-      $('quick-handle').style.borderColor = '#dc2626';
-      return;
+  // 免输入(ADR-0005): 账号由 background 身份探针自动识别; 未识别时按钮引导开 x.com 完成识别
+  const openFollowPage = async () => {
+    let { rf_active: h } = await chrome.storage.local.get('rf_active');
+    if (!h) {
+      try { await chrome.runtime.sendMessage({ cmd: 'identity-probe' }); } catch {}
+      ({ rf_active: h } = await chrome.storage.local.get('rf_active'));
     }
-    chrome.tabs.create({ url: `https://x.com/${name}/verified_followers` });
+    chrome.tabs.create({ url: h ? `https://x.com/${h}/verified_followers` : 'https://x.com/home' });
   };
   $('btn-open-vf').onclick = openFollowPage;
-  $('quick-handle').addEventListener('keydown', (e) => { if (e.key === 'Enter') openFollowPage(); });
-  $('quick-handle').addEventListener('input', () => { $('quick-handle').style.borderColor = '#cbd3d9'; });
-  // 预填最近活跃账号
-  chrome.storage.local.get('rf_active').then(({ rf_active: h }) => { if (h) $('quick-handle').value = h; });
 
   // 开发模式(本地目录导入, manifest 无 update_url)才显示重载按钮
   const isDev = !chrome.runtime.getManifest().update_url;
@@ -85,5 +83,7 @@
     };
   }
   render();
+  // 打开弹窗顺带触发一次身份识别(失败走负缓存, 不会扛请求)
+  try { chrome.runtime.sendMessage({ cmd: 'identity-probe' }); } catch {}
   chrome.storage.onChanged.addListener(render);
 })();

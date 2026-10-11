@@ -36,18 +36,24 @@
 </head>
 <body>
   <h1>XFollowBack 控制台 <a href="https://github.com/marsbuildlog/x-follow-back/blob/main/docs/how2use.md" target="_blank" class="hint" style="font-size:13px;font-weight:400">使用说明 ↗</a></h1>
-  <div id="tab-warn">未检测到打开的 x.com 标签页——输入你的用户名打开认证粉丝页, 或手动打开 https://x.com 并登录。
+  <!-- 首次填用户名的入口收敛到工具栏弹窗; 这里用最近活跃账号一键打开 -->
+  <div id="tab-warn">未检测到打开的 x.com 标签页——拉取与搜索已可后台直连, 但回关动作需页面在场。
     <div class="row" style="margin-top:8px">
-      <input id="quick-handle" placeholder="你的X用户名(不带@)" style="padding:6px 10px;border:1px solid #cbd3d9;border-radius:8px;font-size:13px;" />
       <button id="btn-quick-open">打开认证粉丝页</button>
+      <span id="quick-open-hint" class="hint"></span>
     </div>
   </div>
 
   <h2>任务</h2>
   <section><span id="task-state" class="hint"></span></section>
-  <!-- 任务操作(启动/更新/暂停/恢复)全部在认证粉丝页悬浮控件上, 任务跟着页面走;
-       控制台只留观察 + 重置(危险操作仅此处有, 带 confirm) -->
+  <!-- 三步初始化引导: 账号 → 模板 → 启动, 状态实时(问题2) -->
+  <section id="setup-steps" style="margin:4px 0 10px;line-height:1.9"></section>
+  <!-- 控制按钮(问题3): 自页面悬浮控件迁入, 经消息转发给页面内的任务循环 -->
   <section class="row">
+    <button id="btn-start">开始回关</button>
+    <button id="btn-pause" class="ghost">暂停</button>
+    <button id="btn-resume" class="ghost">恢复</button>
+    <button id="btn-refresh" class="ghost">更新列表</button>
     <button id="btn-reset" class="danger">重置任务</button>
     <span id="op-result" class="hint"></span>
   </section>
@@ -65,7 +71,7 @@
   </div>
   <div class="hint" id="queue-summary"></div>
 
-  <h2>设置</h2>
+  <h2>设置</h2> <!-- 修改即自动保存(防抖), 无保存按钮 -->
   <section>
     <div class="set">
       <div class="set-line">关注间隔 <input type="number" id="s-intervalMin" /> ~ <input type="number" id="s-intervalMax" /> 秒</div>
@@ -83,15 +89,16 @@
       <div id="tag-chips" class="row" style="margin-top:6px"></div>
       <div class="hint">打开这些 tag 的标签页(如 x.com/hashtag/蓝色V互关)才会启用主动关注抓取; 不在列表内的 tag 页不启用</div>
     </div>
-    <button id="btn-save-settings">保存设置</button>
     <span id="settings-result" class="hint"></span>
   </section>
   <div class="hint">
     其余保护机制(限流退避、连续失败熔断、模板过期暂停等)自动运行, 无需配置; 暂停时会发系统通知。
   </div>
 
-  <h2>Route 1 直连实验 <span class="hint">(ADR-0004: background 脱离页面直连)</span></h2>
-  <section>
+  <!-- 调试卡(仅开发模式显示): ADR-0004 指定的复测方法(同刻对照法), 生态复活时一键复验 -->
+  <details id="dev-r1" hidden>
+    <summary style="cursor:pointer;font-weight:700">高级/调试 — Route 1 直连对照实验(ADR-0004)</summary>
+  <section style="margin-top:8px">
     <div class="row">
       <input id="r1-op" value="SearchTimeline" style="padding:6px 10px;border:1px solid #cbd3d9;border-radius:8px;font-size:13px;width:220px" title="GraphQL operation 名" />
       <button id="btn-r1-probe" class="ghost">发射对照实验</button>
@@ -104,6 +111,16 @@
     </details>
     <pre id="r1-out" style="display:none;margin-top:8px"></pre>
   </section>
+  <section style="margin-top:8px;border-top:1px dashed #e1e8ed;padding-top:8px">
+    <div class="row">
+      <input id="fp-target" placeholder="目标@handle(需未关注; 建议用自己的小号)" style="padding:6px 10px;border:1px solid #cbd3d9;border-radius:8px;font-size:13px;width:240px" />
+      <button id="btn-fp-run" class="ghost" title="对目标执行 关注→取关(净零变化), 验证回关动作能否脱离页面直连">回关直连实验</button>
+      <span id="fp-verdict" class="hint"></span>
+    </div>
+    <div class="hint">对目标净变化为零(关注后立即取关)。结果决定: 回关是否还依赖页面重放 + 循环能否搬进后台(关掉所有 x.com 页也能跑)。</div>
+    <pre id="fp-out" style="display:none;margin-top:8px"></pre>
+  </section>
+  </details>
 
   <h2>日志</h2>
   <details open><summary>展开/收起</summary><pre id="log"></pre></details>
