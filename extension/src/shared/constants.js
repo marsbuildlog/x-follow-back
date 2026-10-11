@@ -47,6 +47,8 @@ const RF = {
     // tid 收割池(ADR-0004)让连发成为可能, 但限流桶不变: 两次 SearchTimeline 发射至少隔 SEARCH_MIN_GAP_MS。
     TID_COOLDOWN_MS: 70 * 1000,
     SEARCH_MIN_GAP_MS: 30 * 1000, // 搜索/扫描发射节奏兼底: 50次/15分钟桶 ≈ 18s/发, 30s/发给页面自己的搜索留余量
+    AUTO_SEARCH_COOLDOWN_MS: 2 * 60 * 60 * 1000, // 池子断供自动补池的冷却(2026-10-12): 待关注低于水位且无到期帖时
+                             // 自动抓一轮新帖, 两轮至少隔2小时——搜索常只回旧帖(0 新帖), 无冷却会每 tick(30s)空烧限流桶
   },
 };
 globalThis.RF = RF;

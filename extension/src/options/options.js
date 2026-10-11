@@ -2,7 +2,8 @@
 // 数据编排: 每次渲染读 rf_active → 并行读 回关任务/主动关注任务/每日计数/两个进度 →
 //   分发到 总览卡(状态+操作组件)、各任务 Tab(状态行+操作+明细表)、引导卡。
 // 任务仍宿主在 x.com 页面内; 控制按钮经消息转发(start-task/pause-task/resume-task/
-//   refresh-list/start-af-task/af-search), 抓取互关帖需互关标签页在场。
+//   refresh-list/start-af-task/af-search), 抓取互关帖宿主任意 x.com 标签页
+//   (Route 1 直连不挑场, 标签经消息指定、按配置校验)。
 // 页面只在两处被问到: ①tpl-captured(回关模板捕获状态, 异步增补) ②reset/start 等动作本身。
 (() => {
   'use strict';
@@ -19,6 +20,7 @@
   let curTab = 'todo';      // 回关队列子 tab: todo | done
   let afCurTab = 'todo';    // 主动关注队列子 tab
   let poolFilter = 'all';   // 互关帖池筛选: all | new | old
+  let afSearchTag = null;   // 手动抓取的标签(下拉选择, 默认取配置列表第一个; render 时自愈)
   let opTimer = null, renderTimer = null;
 
   // 插件被 reload 后本页会变成孤儿(chrome.* 全部失效), 需要刷新本页才能恢复
@@ -32,16 +34,6 @@
       if (!tabs.length) return null;
       // 多个 x.com 标签页时优先认证粉丝页(任务页), 其余场景取第一个
       return tabs.find((t) => /\/verified_followers/.test(t.url || '')) || tabs[0];
-    } catch {
-      return null;
-    }
-  }
-
-  // 互关标签页(抓取互关帖必须宿主在标签页上: 搜索/扫描由标签页驱动)
-  async function findTagTab() {
-    try {
-      const tabs = await chrome.tabs.query({ url: 'https://x.com/hashtag/*' });
-      return tabs[0] || null;
     } catch {
       return null;
     }
@@ -99,7 +91,7 @@
       return;
     }
     const { rf_active: h } = await chrome.storage.local.get('rf_active');
-    const [tab, tagTab] = await Promise.all([findXTab(), findTagTab()]);
+    const tab = await findXTab();
     renderHost(h, tab);
 
     let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, lw = null;
@@ -115,11 +107,11 @@
       loopWaitInfo = lw;
     }
     renderFbCard(h, fb, daily, fp, tab);
-    renderAfCard(h, af, tagTab, afp);
+    renderAfCard(h, af, tab, afp);
     renderGuideFb(h, fb, tab);
-    renderGuideAf(h, af, tagTab);
+    renderGuideAf(h, af);
     renderFbDetail(h, fb, daily, fp, tab);
-    renderAfDetail(h, af, afp, tagTab);
+    renderAfDetail(h, af, afp);
     renderLog();
     if (h) enrichFromPage(); // 模板捕获状态异步增补(仅页面可达时)
   }
@@ -136,7 +128,7 @@
     if (tab) {
       el.innerHTML = `<h3>宿主</h3><span class="dot" style="background:#16a34a"></span> 宿主在线 <span class="hint">任意 x.com 标签页即可承载任务循环; 关闭全部页面任务会暂停并通知</span>`;
     } else {
-      el.innerHTML = `<h3>宿主</h3><span class="dot" style="background:#d97706"></span> 宿主离线 <span class="hint">回关动作暂停(拉取/搜索仍可直连); 打开任意 x.com 页面自动继续</span>
+      el.innerHTML = `<h3>宿主</h3><span class="dot" style="background:#d97706"></span> 宿主离线 <span class="hint">任务动作暂停(需页面宿主); 打开任意 x.com 页面自动继续</span>
         <button id="host-open" style="margin:0 0 0 8px;padding:2px 12px;font-size:12px">打开认证粉丝页</button>`;
       const b = $('host-open');
       if (b) b.onclick = () => chrome.tabs.create({ url: h ? `https://x.com/${h}/verified_followers` : 'https://x.com/home' });
@@ -152,7 +144,7 @@
     btns.push(`<button class="ghost" data-taskop="${kind}-pause" ${off(state !== 'running')}>暂停</button>`);
     btns.push(`<button class="ghost" data-taskop="${kind}-resume" ${off(state !== 'paused')}>恢复</button>`);
     if (kind === 'af') {
-      btns.push(`<button class="ghost" data-taskop="af-search" ${off(!extra)} title="${extra ? '翻页搜索帖子入池' : '需先打开互关标签页(x.com/hashtag/<标签>)'}">抓取互关帖</button>`);
+      btns.push(`<button class="ghost" data-taskop="af-search" ${off(!extra)} title="${extra ? '翻页搜索帖子入池(任意 x.com 标签页在线即可, Route 1 直连)' : '需任意 x.com 标签页在线(打开 x.com 即可)'}">抓取互关帖</button>`);
     }
     return `<div class="ops">${btns.join('')}</div>`;
   }
@@ -172,7 +164,7 @@
     `;
   }
 
-  function renderAfCard(h, af, tagTab, afp) {
+  function renderAfCard(h, af, tab, afp) {
     const el = $('dash-af');
     const st = stateOf(af);
     const q = (af && af.queue) || [];
@@ -182,7 +174,7 @@
       for (const p of obj.posts || []) { poolTotal++; if (p.scanCount < RF.AF.SCAN_MAX && p.nextScanAt <= Date.now()) poolDue++; }
     }
     const searching = !!(afp && afp.running);
-    const grabOK = !!tagTab && !searching;
+    const grabOK = !!tab && !searching;
     const water = (af && af.state === 'running' && c.pending < RF.AF.PENDING_TARGET)
       ? ` <span class="hint">(低于水位 ${RF.AF.PENDING_TARGET}, 循环顺路扫帖补员中)</span>` : '';
     el.innerHTML = `
@@ -216,7 +208,7 @@
     if (b) b.onclick = () => chrome.tabs.create({ url: `https://x.com/${h}/verified_followers` });
   }
 
-  function renderGuideAf(h, af, tagTab) {
+  function renderGuideAf(h, af) {
     const el = $('guide-af');
     const tags = pendingTags;
     const poolTotal = Object.values((af && af.tags) || {}).reduce((n, o) => n + (o.posts || []).length, 0);
@@ -228,11 +220,10 @@
     const s1 = tags.length
       ? `${stepMark(true)} <b>配置互关标签</b> — ${tags.map((t) => '#' + esc(t)).join(' ')}(设置 Tab 可改)`
       : `${stepMark(false)} <b>配置互关标签</b> — <button data-goto="settings" style="margin:0;padding:1px 10px;font-size:12px">去设置添加</button>(如 蓝V互关)`;
-    const openBtns = tags.map((t) => `<button class="ghost" style="margin:0;padding:1px 10px;font-size:12px" data-open-tag="${esc(t)}">#${esc(t)}</button>`).join(' ');
-    const grab = `<button data-taskop="af-search" ${tagTab ? '' : 'disabled'} style="margin:0;padding:1px 10px;font-size:12px">抓取互关帖</button>`;
+    const grab = `<button data-taskop="af-search" style="margin:0;padding:1px 10px;font-size:12px">抓取互关帖</button>`;
     const s2 = poolTotal
-      ? `${stepMark(true)} <b>填充帖子池</b> — 已有 ${poolTotal} 帖`
-      : `${stepMark(false)} <b>填充帖子池</b> — ${tags.length ? openBtns : '先完成①'} ${tags.length ? '→ 打开后点 ' + grab : ''}`;
+      ? `${stepMark(true)} <b>填充帖子池</b> — 已有 ${poolTotal} 帖(点 ${grab} 可继续补充)`
+      : `${stepMark(false)} <b>填充帖子池</b> — ${tags.length ? grab + ' <span class="hint">直连抓取, 无需打开标签页</span>' : '先完成①'}`;
     const s3 = running
       ? `${stepMark(true)} <b>启动</b> — 运行中`
       : `${stepMark(false)} <b>启动</b> — 点「开始主动关注」(之后扫描与关注自动进行)`;
@@ -293,7 +284,7 @@
   }
   const postLink = (id) => `<a href="https://x.com/i/web/status/${esc(id)}" target="_blank">${esc(id)}</a>`;
 
-  function renderAfDetail(h, af, afp, tagTab) {
+  function renderAfDetail(h, af, afp) {
     const st = stateOf(af);
     const q = (af && af.queue) || [];
     const c = countsOf(q);
@@ -356,12 +347,19 @@
       $('af-queue-table').querySelector('tbody').innerHTML = '';
       $('af-queue-summary').textContent = '';
     }
-    // 按钮状态(抓取中时禁用抓取, content 侧 afSearching 也有双击拦截)
+    // 按钮状态(抓取中时禁用抓取, content 侧 afSearching 也有双击拦截); 标签选择随配置刷新
     const state = (af && af.state) || null;
     $('btn-af-start').disabled = state === 'running';
     $('btn-af-pause').disabled = state !== 'running';
     $('btn-af-resume').disabled = state !== 'paused';
-    $('btn-af-search').disabled = !tagTab || searching;
+    $('btn-af-search').disabled = searching;
+    // 抓取标签下拉: 配置列表里的一个(默认第一个); 手动抓取按它搜
+    if (!pendingTags.includes(afSearchTag)) afSearchTag = pendingTags[0] || null;
+    const sel = $('af-search-tag');
+    if (sel) {
+      sel.innerHTML = pendingTags.map((t) => `<option value="${esc(t)}" ${t === afSearchTag ? 'selected' : ''}>#${esc(t)}</option>`).join('');
+      sel.style.display = pendingTags.length ? '' : 'none';
+    }
     // 逐标签「打开标签页」快捷按钮(与引导卡同源, pendingTags 变化随渲染更新)
     const tagBtns = $('af-tag-buttons');
     tagBtns.innerHTML = pendingTags.length
@@ -428,17 +426,17 @@
     : '';
 
   // ---------- 操作按钮: 经消息转发给页面内的任务循环 ----------
-  async function taskAction(cmd, picker, resultEl, noTabMsg) {
+  async function taskAction(cmd, picker, resultEl, noTabMsg, extra) {
     const tab = await picker();
     if (!tab) { showOp(resultEl, noTabMsg || '未找到 x.com 标签页'); return; }
     let res;
-    try { res = await chrome.tabs.sendMessage(tab.id, { cmd }); }
+    try { res = await chrome.tabs.sendMessage(tab.id, Object.assign({ cmd }, extra || {})); }
     catch (e) { showOp(resultEl, '发送失败(页面可能刚打开, 稍后重试): ' + e.message); return; }
     showOp(resultEl, (res && res.message) || (res && res.ok ? '已执行' : '失败'));
     scheduleRender(0);
   }
   // 统一委托: 卡片与 Tab 内所有 data-taskop 按钮。
-  // 卡片按钮带业务前缀(fb-*/af-*), 映射到统一的任务消息; af-search 转发需互关标签页。
+  // 卡片按钮带业务前缀(fb-*/af-*), 映射到统一的任务消息; af-search 带 tag 转发(任意 x.com 标签页宿主)。
   // 结果提示落点: 卡片内 → 全局 toast; 任务 Tab 内 → 该视图的 [data-opresult] span。
   document.addEventListener('click', (ev) => {
     const b = ev.target.closest('[data-taskop]');
@@ -448,12 +446,12 @@
       'af-start': 'start-af-task', 'af-pause': 'pause-task', 'af-resume': 'resume-task',
     };
     const cmd = CMD_MAP[b.dataset.taskop] || b.dataset.taskop;
-    const useTag = cmd === 'af-search';
+    const isSearch = cmd === 'af-search';
     const inCard = !!b.closest('.card');
     const scope = b.closest('.view');
     const rel = scope && scope.querySelector('[data-opresult]');
-    taskAction(cmd, useTag ? findTagTab : findXTab, inCard || !rel ? 'toast' : rel,
-      useTag ? '未找到互关标签页——先打开 x.com/hashtag/<标签>' : '未找到 x.com 标签页——先打开认证粉丝页');
+    taskAction(cmd, findXTab, inCard || !rel ? 'toast' : rel,
+      '未找到 x.com 标签页——先打开任意 x.com 页面', isSearch ? { tag: afSearchTag } : undefined);
   });
 
   // ---------- 主导航(hash 记忆停留页) ----------
@@ -496,6 +494,9 @@
     const g = ev.target.closest('[data-goto]');
     if (g) switchView(g.dataset.goto);
   });
+  // 抓取标签下拉: 手动抓取按它搜(选中值随重渲染保留)
+  const afSearchTagSel = $('af-search-tag');
+  if (afSearchTagSel) afSearchTagSel.onchange = (e) => { afSearchTag = e.target.value; };
   // 「打开 #标签」按钮: 新窗口打开对应互关标签页; 稍后重渲染以刷新抓取按钮的可用态
   document.addEventListener('click', (ev) => {
     const b = ev.target.closest('[data-open-tag]');

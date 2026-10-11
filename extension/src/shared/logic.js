@@ -387,6 +387,29 @@
     return best;
   }
 
+  // 自动补池选签: 上次自动抓取标签在配置列表里的下一个(环形轮换, 多标签时分摊限流桶);
+  // 首次(lastTag 空)或上次标签已从配置移除时取第一个。返回配置里的原始写法(保留大小写)。
+  function nextAutoSearchTag(tags, lastTag) {
+    const list = (tags || []).map((t) => String(t).replace(/^#/, '').trim()).filter(Boolean);
+    if (!list.length) return null;
+    const norm = (t) => t.toLowerCase();
+    const i = list.findIndex((t) => norm(t) === norm(String(lastTag || '').replace(/^#/, '').trim()));
+    return list[(i + 1) % list.length];
+  }
+
+  // 池子断供检测: 主动关注可运行(running/done) + 待关注低于水位 + 无到期帖(当日已扫完或池见底)
+  // + 距上次抓取(手动/自动均计)超过冷却 → 该自动抓一轮补池。
+  // 纯函数供单测; 调用方(autoTick)再叠加宿主/锁/抓取中互斥。选签用 nextAutoSearchTag(基于配置列表)。
+  function shouldAutoSearch(af, now, opts) {
+    const { pendingTarget, scanMax, cooldownMs } = opts || {};
+    if (!af) return false;
+    if (af.state !== 'running' && af.state !== 'done') return false;
+    const pending = (af.queue || []).filter((q) => q.status === 'pending').length;
+    if (pending >= pendingTarget) return false;
+    if (duePostAcrossTags(af.tags, now, scanMax)) return false;
+    return now - (af.lastAutoSearchAt || 0) >= cooldownMs;
+  }
+
   // 扫描完成后: 计数+1, 隔 SCAN_INTERVAL_MS 重扫; 到达上限后不再到期(duePost 已滤)
   function markScanned(post, now, scanIntervalMs) {
     post.scanCount = (post.scanCount || 0) + 1;
@@ -401,5 +424,6 @@
     rateLimitBackoffMs, windowExhaustedWaitMs,
     parseSearchTimeline, passesRatio, afEligible, pickNextItem,
     mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
+    nextAutoSearchTag, shouldAutoSearch,
   };
 })();

@@ -10,6 +10,7 @@ const {
   rateLimitBackoffMs, windowExhaustedWaitMs,
   parseSearchTimeline, passesRatio, afEligible, pickNextItem,
   mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
+  nextAutoSearchTag, shouldAutoSearch,
 } = globalThis.XFollowBackLogic;
 
 // ---------- 测试工具 ----------
@@ -545,4 +546,55 @@ test('parseSearchTimeline: 新版 schema——计数取 relationship_counts, 保
   const ub = out.items[1].user;
   assert.equal(ub.blue, false);
   assert.equal(afEligible(ub, 1.2).reason, 'not-blue');
+});
+
+// ---------- 池子断供自动补池(ADR-0006) ----------
+const NOW = 1_800_000_000_000;
+const OPTS = { pendingTarget: 50, scanMax: 3, cooldownMs: 2 * 60 * 60 * 1000 };
+function afFixture(overrides = {}) {
+  return Object.assign({
+    state: 'running',
+    queue: [{ status: 'pending' }],   // 待关注 1 < 50
+    tags: { 蓝V互关: { posts: [{ postId: 'p1', scanCount: 3, nextScanAt: NOW - 1 }] } }, // 全部扫完→无到期帖
+    lastAutoSearchAt: 0,
+  }, overrides);
+}
+
+test('shouldAutoSearch: 列表见底+无到期帖+冷却已过 → 触发', () => {
+  assert.equal(shouldAutoSearch(afFixture(), NOW, OPTS), true);
+});
+
+test('shouldAutoSearch: 还有到期帖 → 不触发(扫描还没供完血)', () => {
+  const af = afFixture({ tags: { 蓝V互关: { posts: [{ postId: 'p1', scanCount: 0, nextScanAt: NOW - 1 }] } } });
+  assert.equal(shouldAutoSearch(af, NOW, OPTS), false);
+});
+
+test('shouldAutoSearch: 待关注已达水位 → 不触发(需求侧不缺人)', () => {
+  const af = afFixture({ queue: Array.from({ length: 50 }, () => ({ status: 'pending' })) });
+  assert.equal(shouldAutoSearch(af, NOW, OPTS), false);
+});
+
+test('shouldAutoSearch: 冷却未过 → 不触发(防搜索只回旧帖时每 tick 空烧桶)', () => {
+  const af = afFixture({ lastAutoSearchAt: NOW - 60_000 });
+  assert.equal(shouldAutoSearch(af, NOW, OPTS), false);
+  const af2 = afFixture({ lastAutoSearchAt: NOW - OPTS.cooldownMs });
+  assert.equal(shouldAutoSearch(af2, NOW, OPTS), true);
+});
+
+test('shouldAutoSearch: done(队列见底)也算可运行——这是断供的主场景', () => {
+  const af = afFixture({ state: 'done', queue: [] });
+  assert.equal(shouldAutoSearch(af, NOW, OPTS), true);
+  const paused = afFixture({ state: 'paused' });
+  assert.equal(shouldAutoSearch(paused, NOW, OPTS), false);
+  const idle = afFixture({ state: 'idle' });
+  assert.equal(shouldAutoSearch(idle, NOW, OPTS), false);
+});
+
+test('nextAutoSearchTag: 环形轮换 + 去#/空白(与 settings 存储形式一致) + 失效回第一个', () => {
+  const tags = ['#蓝V互关', 'FollowBack', ' 互推 '];
+  assert.equal(nextAutoSearchTag(tags, null), '蓝V互关');          // 首次取第一个(去#)
+  assert.equal(nextAutoSearchTag(tags, '#蓝V互关'), 'FollowBack');  // 依次轮换
+  assert.equal(nextAutoSearchTag(tags, 'followback'), '互推');      // 大小写不敏感匹配 + 去空白
+  assert.equal(nextAutoSearchTag(tags, '不存在的'), '蓝V互关');     // 失效回第一个
+  assert.equal(nextAutoSearchTag([], null), null);                 // 未配置不抓
 });

@@ -315,7 +315,8 @@
   // ---------- 通用工具 ----------
   // 纯逻辑(parseFollowers/interpret/mergeUsers/pickNextItem/...)在 shared/logic.js(顶部已显式 import), 有单元测试覆盖
   const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName, rateLimitBackoffMs, windowExhaustedWaitMs,
-    parseSearchTimeline, afEligible, pickNextItem, mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned } = L;
+    parseSearchTimeline, afEligible, pickNextItem, mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
+    nextAutoSearchTag, shouldAutoSearch } = L;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
   // 分段休眠(每段≤30s): 后台标签页的定时器会被 Chrome 节流到约1次/分钟,
@@ -480,10 +481,11 @@
   }
 
   // ============================================================
-  // 主动关注(蓝V互关): 搜索阶段 + 扫描阶段(生产者, 只在互关标签页运行)
-  //   搜索: 手动触发, 翻页拉互关帖 → 帖子 ID 入互关帖池, 帖子作者入队列
+  // 主动关注(蓝V互关): 搜索阶段 + 扫描阶段(生产者)
+  //   搜索: 控制台手动触发(任意 x.com 标签页宿主, 标签经消息指定)或池子断供自动触发;
+  //         翻页拉互关帖 → 帖子 ID 入互关帖池, 帖子作者入队列
   //   扫描: 到期帖子的回复翻页 → 新评论者/作者入队列; 首扫拉完, 隔两天重扫, 最多三次
-  //   两者共用 SearchTimeline 模板(标签页加载时自动捕获), 扫描用 conversation_id: 语法
+  //   两者共用 SearchTimeline 模板, 走 Route 1 直连不挑页面(结构性缺料才回退页面重放), 扫描用 conversation_id: 语法
   // ============================================================
   let afSearching = false;
   let afScanning = false;
@@ -622,7 +624,10 @@
     }
   }
 
-  // 搜索阶段(手动): 翻页拉互关帖, 帖子入池 + 作者入队。
+  // 搜索阶段(手动/自动): 翻页拉互关帖, 帖子入池 + 作者入队。
+  // 宿主=任意 x.com 标签页(Route 1 直连不挑场; 回退重放才需要页面捕获过模板)。
+  // 发车即记自动补池时钟(lastAutoSearchAt/Tag, 手动抓取同样刷新): 失败也计冷却,
+  // 防断供时每 30s 一 tick 地空烧限流桶。
   // 分页期间只攒本地数据, 不持有任务对象(避免覆盖循环写入的状态); 最后逐块"重读→改→存"
   async function runAfSearch(tag, handle) {
     if (afSearching) return { ok: false, message: '已在搜索中' };
@@ -631,6 +636,13 @@
     let done = null; // 结束时留档(running:false + finishedAt), 供控制台显示"上轮抓取完成"
     try {
       await setActive(handle);
+      // 发车即记自动补池时钟: 下次自动补池从现在起算冷却(手动抓取同样刷新)
+      {
+        const t = await getAfTask(handle);
+        t.lastAutoSearchAt = Date.now();
+        t.lastAutoSearchTag = tag;
+        await saveAfTask(handle, t);
+      }
       // 发车即写进度(running:true): 控制台 storage 监听 ~300ms 内亮起"抓取中", 不等首页返回
       await store.set(K.afProgress, { tag, page: 0, maxPages: AF.SEARCH_MAX_PAGES, posts: 0, running: true });
       await log(`抓取互关帖发车: #${tag}, 最多${AF.SEARCH_MAX_PAGES}页(桶节奏 30s/发; 若遇供血/tid 冷却, 等待原因都会写进日志)`);
@@ -1075,6 +1087,24 @@
     if (fetchingFollowers || afSearching || afScanning) return;
     const settings = await getSettings();
 
+    // 池子断供自动补池: 待关注低于水位 + 无到期帖(当日已扫完/池见底) + 冷却已过 → 自动抓一轮新帖。
+    // 放在标签页分支之前: 任一 x.com 页面都能触发(Route 1 直连不挑场); 搜到新人 → done 自动续跑。
+    {
+      const h = await afHandle();
+      if (h) {
+        const af = await getAfTask(h);
+        const autoTag = nextAutoSearchTag(settings.tags, af.lastAutoSearchTag);
+        if (autoTag && shouldAutoSearch(af, Date.now(),
+          { pendingTarget: AF.PENDING_TARGET, scanMax: AF.SCAN_MAX, cooldownMs: AF.AUTO_SEARCH_COOLDOWN_MS })) {
+          if (await acquireLock()) {
+            await log(`池子断供自动补池: 待关注低于水位${AF.PENDING_TARGET}且无到期帖, 自动抓取 #${autoTag}`);
+            runAfSearch(autoTag, h).catch((e) => log(`自动抓取异常: ${e}`));
+          }
+          return; // 本 tick 到此为止(与扫描/回关拉取的互斥由顶部 afSearching 等闸门 + 抓取内节奏控制保证)
+        }
+      }
+    }
+
     // 互关标签页: 主动关注任务接管/恢复优先, 其次到期帖扫描(每 tick 一帖)
     if (tag) {
       const h = await afHandle();
@@ -1149,14 +1179,22 @@
             sendResponse(await startAfTask(h));
             break;
           case 'af-search': {
-            // 抓取互关帖宿主在互关标签页上: 只接受从标签页转发来的调用。
+            // 抓取宿主=任意 x.com 标签页(Route 1 直连不挑场), 标签由调用方指定并按配置校验
+            // (旧机制要求互关标签页在场, 只是为了从 URL 拿标签+捕获模板; Route 1 落地后两者都不再必需)。
             // 立即应答, 搜索转后台执行——全程可达数分钟(桶节奏 30s/发、池子供血、tid 冷却 70s),
             // 若同步等它, 按钮会几分钟无反应。进度走 rf_af_progress + 日志, 双击由 afSearching 拦下。
-            const tag = curTag();
-            if (!tag) { sendResponse({ ok: false, message: '此标签页不是已配置的互关标签页' }); break; }
             if (afSearching) { sendResponse({ ok: false, message: '已在搜索中, 等本轮跑完' }); break; }
-            runAfSearch(tag, h).catch((e) => log(`抓取异常: ${e}`));
-            sendResponse({ ok: true, message: '搜索已发车——进度见状态行与日志(页间有节奏控制, 非卡住)' });
+            const tags = ((await getSettings()).tags) || [];
+            const norm = (t) => String(t || '').replace(/^#/, '').trim().toLowerCase();
+            const want = norm(msg.tag);
+            const tag = tags.find((t) => norm(t) === want) || (tags.length === 1 ? tags[0] : null);
+            const tagStr = tag ? String(tag).replace(/^#/, '').trim() : null;
+            if (!tagStr) {
+              sendResponse({ ok: false, message: want ? `#${want} 不在配置的互关标签里——先在设置里添加` : '未指定标签——先在设置里配置互关标签' });
+              break;
+            }
+            runAfSearch(tagStr, h).catch((e) => log(`抓取异常: ${e}`));
+            sendResponse({ ok: true, message: '搜索已发车——进度见控制台状态行与日志(页间有节奏控制, 非卡住)' });
             break;
           }
           case 'pause-task':
