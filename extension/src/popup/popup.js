@@ -12,8 +12,6 @@
   async function render() {
     const { rf_active: h } = await chrome.storage.local.get('rf_active');
     const dot = $('dot');
-    // 按钮标签随识别状态分流: 已识别 → 直达认证粉丝页; 未识别 → 引导开 x.com 完成识别
-    $('btn-open-vf').textContent = h ? '打开认证粉丝页' : '打开 x.com 完成识别';
     if (!h) {
       $('handle').textContent = '—';
       $('state').textContent = '未识别账号——打开 x.com 登录后自动识别';
@@ -58,17 +56,6 @@
 
   // 使用说明(仓库 how2use 文档)
   $('guide').onclick = () => chrome.tabs.create({ url: 'https://github.com/marsbuildlog/x-follow-back/blob/main/docs/how2use.md' });
-
-  // 免输入(ADR-0005): 账号由 background 身份探针自动识别; 未识别时按钮引导开 x.com 完成识别
-  const openFollowPage = async () => {
-    let { rf_active: h } = await chrome.storage.local.get('rf_active');
-    if (!h) {
-      try { await chrome.runtime.sendMessage({ cmd: 'identity-probe' }); } catch {}
-      ({ rf_active: h } = await chrome.storage.local.get('rf_active'));
-    }
-    chrome.tabs.create({ url: h ? `https://x.com/${h}/verified_followers` : 'https://x.com/home' });
-  };
-  $('btn-open-vf').onclick = openFollowPage;
 
   // 开发模式(本地目录导入, manifest 无 update_url)才显示重载按钮
   const isDev = !chrome.runtime.getManifest().update_url;

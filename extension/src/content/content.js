@@ -630,6 +630,7 @@
     afSearching = true;
     try {
       await setActive(handle);
+      await log(`抓取互关帖发车: #${tag}, 最多${AF.SEARCH_MAX_PAGES}页(桶节奏 30s/发; 若遇供血/tid 冷却, 等待原因都会写进日志)`);
       const rawQuery = '#' + tag;
       let cursor = null;
       let page = 0;
@@ -1093,6 +1094,21 @@
             if (!h) { sendResponse({ ok: false, message: '未识别到登录账号——先打开 x.com 完成识别' }); break; }
             sendResponse(await startTask(h));
             break;
+          case 'start-af-task':
+            if (!h) { sendResponse({ ok: false, message: '未识别到登录账号——先打开 x.com 完成识别' }); break; }
+            sendResponse(await startAfTask(h));
+            break;
+          case 'af-search': {
+            // 抓取互关帖宿主在互关标签页上: 只接受从标签页转发来的调用。
+            // 立即应答, 搜索转后台执行——全程可达数分钟(桶节奏 30s/发、池子供血、tid 冷却 70s),
+            // 若同步等它, 按钮会几分钟无反应。进度走 rf_af_progress + 日志, 双击由 afSearching 拦下。
+            const tag = curTag();
+            if (!tag) { sendResponse({ ok: false, message: '此标签页不是已配置的互关标签页' }); break; }
+            if (afSearching) { sendResponse({ ok: false, message: '已在搜索中, 等本轮跑完' }); break; }
+            runAfSearch(tag, h).catch((e) => log(`抓取异常: ${e}`));
+            sendResponse({ ok: true, message: '搜索已发车——进度见状态行与日志(页间有节奏控制, 非卡住)' });
+            break;
+          }
           case 'pause-task':
             if (!h) { sendResponse({ ok: false, message: '未识别到登录账号' }); break; }
             await pauseTask(h, 'manual');
