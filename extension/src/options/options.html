@@ -108,10 +108,10 @@
     <h2>主动关注 <span class="hint">从互关标签下的帖子发现蓝V, 先行关注期待回关</span></h2>
     <section><span id="af-state" class="hint"></span></section>
     <section class="row" style="margin:10px 0">
-      <button id="btn-af-start">开始主动关注</button>
-      <button id="btn-af-pause" class="ghost">暂停</button>
-      <button id="btn-af-resume" class="ghost">恢复</button>
-      <button id="btn-af-search" class="ghost" title="打开互关标签页后可用: 翻页搜索帖子入池">抓取互关帖</button>
+      <button id="btn-af-start" data-taskop="af-start">开始主动关注</button>
+      <button id="btn-af-pause" class="ghost" data-taskop="af-pause">暂停</button>
+      <button id="btn-af-resume" class="ghost" data-taskop="af-resume">恢复</button>
+      <button id="btn-af-search" class="ghost" data-taskop="af-search" title="打开互关标签页后可用: 翻页搜索帖子入池">抓取互关帖</button>
       <span id="af-tag-buttons" class="row" style="margin:0;gap:4px"></span>
       <span id="af-op-result" class="hint" data-opresult></span>
     </section>

@@ -740,7 +740,21 @@
   // 主动关注启动(标签页面板按钮): 与回关同一个循环, 逐条优先自动生效
   async function startAfTask(handle) {
     if (!handle) return { ok: false, message: '未识别到登录账号——请确认已登录 x.com' };
-    if (runningHandle) return { ok: false, message: `任务已在运行(@${runningHandle})` };
+    const t0 = await getAfTask(handle);
+    if (t0.state === 'running') return { ok: false, message: '主动关注任务已在运行' };
+    if (runningHandle) {
+      // 循环已在跑(可能在限流等待): 只登记状态, 醒来后回关优先自动接续。
+      // 旧语义直接拒绝("任务已在运行"), 逼用户等窗口过去才能点——不合理: 点开始的语义就是
+      // "我要这个任务跑", 节奏/等待是循环自己的事
+      t0.state = 'running';
+      t0.pauseReason = null;
+      t0.nextAutoResumeAt = null;
+      t0.lastError = null;
+      await saveAfTask(handle, t0);
+      await setActive(handle);
+      await log('主动关注已登记运行(循环醒来后按回关优先接续)');
+      return { ok: true, message: '已登记运行——循环醒来后自动接续(当前在限流等待)' };
+    }
     try {
       const cap = await callPage('list-captured', {});
       if (!(cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API)) {
@@ -823,8 +837,18 @@
     if (!screenName) {
       return { ok: false, message: '缺少 screenName——请在目标账号的 verified_followers 页面上操作' };
     }
+    const t0 = await getTask(screenName);
+    if (t0.state === 'running') return { ok: false, message: '回关任务已在运行' };
     if (runningHandle) {
-      return { ok: false, message: `任务已在运行(@${runningHandle}), 一个标签页同一时间只跑一个账号` };
+      // 循环已在跑(可能在限流等待): 只登记状态, 醒来后回关优先自动接续(与 startAfTask 同语义)
+      t0.state = 'running';
+      t0.pauseReason = null;
+      t0.nextAutoResumeAt = null;
+      t0.lastError = null;
+      await saveTask(screenName, t0);
+      await setActive(screenName);
+      await log('回关已登记运行(循环醒来后按回关优先接续)');
+      return { ok: true, message: '已登记运行——循环醒来后自动接续(当前在限流等待)' };
     }
     // 首次使用守卫: 回关模板未捕获时关注必然失败 → 引导先完成一次手动回关
     // (拉取不受影响, 打开页面后观察器会自动补拉)
@@ -834,7 +858,7 @@
         return { ok: false, message: '首次使用: 请先在认证粉丝列表里点一次任意用户的「回关」按钮, 再点开始回关' };
       }
     } catch {}
-    const t = await getTask(screenName);
+    const t = t0;
     const pendingCount = t.queue.filter((q) => q.status === 'pending').length;
     t.state = 'running';
     t.pauseReason = null;
@@ -968,7 +992,7 @@
           } else {
             const resetTxt = r.rateReset ? ', 窗口 ' + new Date(r.rateReset * 1000).toLocaleTimeString() + ' 重置' : '';
             await setLoopWait({ until: Date.now() + backoff, text: '限流重试' });
-            await log(`限流(${rateRetryCount}/3)${resetTxt}, ${Math.round(backoff / 1000)}秒后重试同一人 ${atName(current)}`);
+            await log(`限流(连续第${rateRetryCount}次, 满3次跳过)${resetTxt}, ${Math.round(backoff / 1000)}秒后重试同一人 ${atName(current)}`);
             if (!(await sleepInterruptible(backoff, handle))) break;
             await setLoopWait(null);
           }
