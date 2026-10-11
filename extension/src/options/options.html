@@ -82,10 +82,10 @@
     <h2>回关 <span class="hint">回关已关注自己的认证粉丝; 队列来自认证粉丝页</span></h2>
     <section><span id="task-state" class="hint"></span></section>
     <section class="row" style="margin:10px 0">
-      <button id="btn-start">开始回关</button>
-      <button id="btn-pause" class="ghost">暂停</button>
-      <button id="btn-resume" class="ghost">恢复</button>
-      <button id="btn-refresh" class="ghost">更新列表</button>
+      <button id="btn-start" data-taskop="fb-start">开始回关</button>
+      <button id="btn-pause" class="ghost" data-taskop="fb-pause">暂停</button>
+      <button id="btn-resume" class="ghost" data-taskop="fb-resume">恢复</button>
+      <button id="btn-refresh" class="ghost" data-taskop="refresh-list">更新列表</button>
       <button id="btn-reset" class="danger">重置任务</button>
       <span id="op-result" class="hint" data-opresult></span>
     </section>

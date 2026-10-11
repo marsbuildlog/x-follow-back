@@ -67,8 +67,15 @@
     const t = new Date();
     return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())}`;
   };
-  const fmtT = (ts) => (ts ? new Date(ts).toLocaleTimeString() : '—');
   const fmtDT = (ts) => (ts ? new Date(ts).toLocaleString() : '—');
+  // 智能时刻: 今天只显 HH:mm, 跨天带日期(重扫间隔两天, 纯时刻分不清是哪天)
+  const fmtWhen = (ts) => {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, '0');
+    const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+    return d.toDateString() === new Date().toDateString() ? hm : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
+  };
   const stepMark = (b) => (b ? '✅' : '⬜');
   // 任务状态 → 文案/圆点色(与页面悬浮控件一致)
   function stateOf(t) {
@@ -240,7 +247,7 @@
       $('task-state').innerHTML =
         `账号: @${esc(h)} · 状态: <b>${esc(st.text)}</b>` +
         ` · 总数: ${q.length} · 待回关: ${c.pending} · 今日已回关: ${daily.followed}` +
-        (fb.lastFetchAt ? ` · 上次拉取: ${fmtT(fb.lastFetchAt)}` : '') +
+        (fb.lastFetchAt ? ` · 上次拉取: ${fmtWhen(fb.lastFetchAt)}` : '') +
         ` · 回关模板: ${tplBadge(tplCaptured)}${fetchChip}` +
         (fb.lastError ? `<br>最近错误: <span style="color:#b02a37">${esc(fb.lastError)}</span>` : '');
     }
@@ -313,7 +320,7 @@
       .slice(0, MAX_ROWS)
       .map((p) => {
         const ps = poolStatus(p);
-        return `<tr><td>#${esc(p.tag)}</td><td>${postLink(p.postId)}</td><td style="color:${ps.c}">${ps.t}</td><td>${p.scanCount}/${RF.AF.SCAN_MAX}</td><td>${fmtT(p.lastScanAt)}</td><td>${fmtT(p.nextScanAt)}</td></tr>`;
+        return `<tr><td>#${esc(p.tag)}</td><td>${postLink(p.postId)}</td><td style="color:${ps.c}">${ps.t}</td><td>${p.scanCount}/${RF.AF.SCAN_MAX}</td><td>${fmtWhen(p.lastScanAt)}</td><td>${fmtWhen(p.nextScanAt)}</td></tr>`;
       }).join('');
     $('pool-summary').textContent = filtered.length
       ? (filtered.length > MAX_ROWS ? `仅显示前 ${MAX_ROWS} 条 / 共 ${filtered.length} 条 · ` : '') + `共 ${poolTotal} 帖 · 待扫 ${poolDue}`
@@ -411,13 +418,16 @@
     scheduleRender(0);
   }
   // 统一委托: 卡片与 Tab 内所有 data-taskop 按钮。
+  // 卡片按钮带业务前缀(fb-*/af-*), 映射到统一的任务消息; af-search 转发需互关标签页。
   // 结果提示落点: 卡片内 → 全局 toast; 任务 Tab 内 → 该视图的 [data-opresult] span。
-  // 拾取规则: 回关动作/暂停恢复找任意 x.com 页; 抓取互关帖必须互关标签页。
   document.addEventListener('click', (ev) => {
     const b = ev.target.closest('[data-taskop]');
     if (!b || b.disabled) return;
-    const raw = b.dataset.taskop;
-    const cmd = raw === 'af-start' ? 'start-af-task' : raw;
+    const CMD_MAP = {
+      'fb-start': 'start-task', 'fb-pause': 'pause-task', 'fb-resume': 'resume-task',
+      'af-start': 'start-af-task', 'af-pause': 'pause-task', 'af-resume': 'resume-task',
+    };
+    const cmd = CMD_MAP[b.dataset.taskop] || b.dataset.taskop;
     const useTag = cmd === 'af-search';
     const inCard = !!b.closest('.card');
     const scope = b.closest('.view');
