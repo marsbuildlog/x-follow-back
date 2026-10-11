@@ -207,8 +207,12 @@
     const urlh = curHandle();
     if (!urlh) return '';
     const me = await whoamiHandle();
-    if (!me) return '';
-    return urlh.toLowerCase() === me.toLowerCase() ? me : '';
+    if (me) return urlh.toLowerCase() === me.toLowerCase() ? me : '';
+    // 接口识别失败时的兕底: 现代页面已不发 Viewer op(2026-10-11 实测: 无该 op,
+    // viewer_context.json 是 200 空体心跳), settings.json 又常 429——嗅探源事实上已绝迹。
+    // URL handle 与最近活跃账号(历史上经 API 确认过)一致才采信; 逛别人页面 URL handle ≠ active 依旧拒绝。
+    const { [RFg.KEY.active]: active } = await chrome.storage.local.get(RFg.KEY.active);
+    return active && urlh.toLowerCase() === String(active).toLowerCase() ? urlh : '';
   }
 
   // ---------- 与 MAIN world 的桥 ----------
