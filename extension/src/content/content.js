@@ -1095,9 +1095,9 @@
         const af = await getAfTask(h);
         const autoTag = nextAutoSearchTag(settings.tags, af.lastAutoSearchTag);
         if (autoTag && shouldAutoSearch(af, Date.now(),
-          { pendingTarget: AF.PENDING_TARGET, scanMax: AF.SCAN_MAX, cooldownMs: AF.AUTO_SEARCH_COOLDOWN_MS })) {
+          { pendingTarget: AF.PENDING_TARGET, scanMax: AF.SCAN_MAX, poolMin: AF.POOL_MIN, cooldownMs: AF.AUTO_SEARCH_COOLDOWN_MS })) {
           if (await acquireLock()) {
-            await log(`池子断供自动补池: 待关注低于水位${AF.PENDING_TARGET}且无到期帖, 自动抓取 #${autoTag}`);
+            await log(`池子断供自动补池: 待关注低于水位${AF.PENDING_TARGET}且池子供给不足(存活帖<${AF.POOL_MIN}或无到期帖), 自动抓取 #${autoTag}`);
             runAfSearch(autoTag, h).catch((e) => log(`自动抓取异常: ${e}`));
           }
           return; // 本 tick 到此为止(与扫描/回关拉取的互斥由顶部 afSearching 等闸门 + 抓取内节奏控制保证)

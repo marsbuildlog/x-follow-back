@@ -550,23 +550,43 @@ test('parseSearchTimeline: 新版 schema——计数取 relationship_counts, 保
 
 // ---------- 池子断供自动补池(ADR-0006) ----------
 const NOW = 1_800_000_000_000;
-const OPTS = { pendingTarget: 50, scanMax: 3, cooldownMs: 2 * 60 * 60 * 1000 };
+const OPTS = { pendingTarget: 50, scanMax: 3, poolMin: 10, cooldownMs: 60 * 60 * 1000 };
+// 构造 n 个存活帖(scanCount=0), 默认都在两天重扫冷却里(nextScanAt 在未来)
+const alivePosts = (n, overrides = {}) =>
+  Array.from({ length: n }, (_, i) => ({ postId: 'p' + i, scanCount: 0, nextScanAt: NOW + 2 * 864e5, ...overrides }));
 function afFixture(overrides = {}) {
   return Object.assign({
     state: 'running',
     queue: [{ status: 'pending' }],   // 待关注 1 < 50
-    tags: { 蓝V互关: { posts: [{ postId: 'p1', scanCount: 3, nextScanAt: NOW - 1 }] } }, // 全部扫完→无到期帖
+    tags: { 蓝V互关: { posts: [{ postId: 'p1', scanCount: 3, nextScanAt: NOW - 1 }] } }, // 全部扫完→池子枯竭
     lastAutoSearchAt: 0,
   }, overrides);
 }
 
-test('shouldAutoSearch: 列表见底+无到期帖+冷却已过 → 触发', () => {
+test('shouldAutoSearch: 列表见底+池子枯竭+冷却已过 → 触发', () => {
   assert.equal(shouldAutoSearch(afFixture(), NOW, OPTS), true);
 });
 
-test('shouldAutoSearch: 还有到期帖 → 不触发(扫描还没供完血)', () => {
-  const af = afFixture({ tags: { 蓝V互关: { posts: [{ postId: 'p1', scanCount: 0, nextScanAt: NOW - 1 }] } } });
-  assert.equal(shouldAutoSearch(af, NOW, OPTS), false);
+test('shouldAutoSearch: 存活帖不足 POOL_MIN → 触发(即使都还在两天重扫冷却里)', () => {
+  const af = afFixture({ tags: { 蓝V互关: { posts: alivePosts(9) } } });
+  assert.equal(shouldAutoSearch(af, NOW, OPTS), true);
+});
+
+test('shouldAutoSearch: 存活帖达 POOL_MIN 但无到期帖 → 触发(今天没得扫, 抓新帖——原始场景)', () => {
+  const af = afFixture({ tags: { 蓝V互关: { posts: alivePosts(10) } } });
+  assert.equal(shouldAutoSearch(af, NOW, OPTS), true);
+});
+
+test('shouldAutoSearch: 存活充足+还有到期帖 → 不触发(扫描还没供完血); 存活不足则优先抓', () => {
+  const enough = afFixture({ tags: { 蓝V互关: { posts: alivePosts(12, { nextScanAt: NOW - 1 }) } } });
+  assert.equal(shouldAutoSearch(enough, NOW, OPTS), false);
+  const scarce = afFixture({ tags: { 蓝V互关: { posts: alivePosts(9, { nextScanAt: NOW - 1 }) } } });
+  assert.equal(shouldAutoSearch(scarce, NOW, OPTS), true);
+});
+
+test('shouldAutoSearch: 死帖(scanCount≥SCAN_MAX)不计入存活', () => {
+  const af = afFixture({ tags: { 蓝V互关: { posts: [...alivePosts(0), { postId: 'd1', scanCount: 3, nextScanAt: NOW - 1 }, { postId: 'd2', scanCount: 5, nextScanAt: NOW - 1 }] } } });
+  assert.equal(shouldAutoSearch(af, NOW, OPTS), true);
 });
 
 test('shouldAutoSearch: 待关注已达水位 → 不触发(需求侧不缺人)', () => {

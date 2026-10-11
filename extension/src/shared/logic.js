@@ -397,16 +397,27 @@
     return list[(i + 1) % list.length];
   }
 
-  // 池子断供检测: 主动关注可运行(running/done) + 待关注低于水位 + 无到期帖(当日已扫完或池见底)
-  // + 距上次抓取(手动/自动均计)超过冷却 → 该自动抓一轮补池。
+  // 池子断供检测: 主动关注可运行(running/done) + 待关注低于水位
+  // + (存活帖不足 POOL_MIN 或 无到期帖(当日已扫完/池见底)) + 距上次抓取(手动/自动均计)超过冷却
+  // → 该自动抓一轮补池。
+  // 存活帖 = scanCount < scanMax(还能扫出候选人的帖); 存活不足说明供给即将枯竭,
+  // 即使它们都还在两天重扫冷却里(无到期帖)也直接抓, 不等两天。
   // 纯函数供单测; 调用方(autoTick)再叠加宿主/锁/抓取中互斥。选签用 nextAutoSearchTag(基于配置列表)。
   function shouldAutoSearch(af, now, opts) {
-    const { pendingTarget, scanMax, cooldownMs } = opts || {};
+    const { pendingTarget, scanMax, poolMin, cooldownMs } = opts || {};
     if (!af) return false;
     if (af.state !== 'running' && af.state !== 'done') return false;
     const pending = (af.queue || []).filter((q) => q.status === 'pending').length;
     if (pending >= pendingTarget) return false;
-    if (duePostAcrossTags(af.tags, now, scanMax)) return false;
+    let alive = 0, hasDue = false;
+    for (const obj of Object.values(af.tags || {})) {
+      for (const p of (obj && obj.posts) || []) {
+        if (!p || p.scanCount >= scanMax) continue;
+        alive++;
+        if (p.nextScanAt <= now) hasDue = true;
+      }
+    }
+    if (alive >= poolMin && hasDue) return false;
     return now - (af.lastAutoSearchAt || 0) >= cooldownMs;
   }
 

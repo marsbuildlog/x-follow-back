@@ -16,16 +16,18 @@ options 页用 `findXTab()` 转发 `af-search` 并携带 `tag`(详情 Tab 新增
 每 tick(30s)检查, 全部满足才触发(纯函数 `shouldAutoSearch` 有单测):
 - 主动关注任务可运行(`running` 或 `done`——`done` 是"列表见底"的主场景; `idle`/`paused` 不代跑);
 - 待关注 < 水位线 `PENDING_TARGET(50)`(需求侧确实缺人);
-- 无到期帖(`duePostAcrossTags` 为空——当日已扫完或池见底);
-- 距上次抓取 ≥ `AUTO_SEARCH_COOLDOWN_MS(2h)`。
+- 池子断供: **存活帖(未扫完 scanCount<SCAN_MAX) < `POOL_MIN(10)`** 或 **无到期帖**(当日已扫完/池见底)。
+  存活帖才是有效供给——它们哪怕都还在两天重扫冷却里, 供给即将枯竭也直接抓, 不等;
+- 距上次抓取 ≥ `AUTO_SEARCH_COOLDOWN_MS(1h)`。
 选签用 `nextAutoSearchTag` 在配置列表里环形轮换(多标签分摊限流桶, 失效回第一个)。抓到新人后 done 自动续跑(复用 `enqueueAfCandidates` 既有逻辑), 新帖 `nextScanAt=now` 由循环水位扫描接手。
 
 **3. 发车即记补池时钟。**
-`runAfSearch` 发车时写 `lastAutoSearchAt/Tag`(手动抓取同样刷新): 搜索常只回旧帖(0 新帖), 若只在成功时记时, 失败/空转会每 30s 一 tick 地空烧限流桶; 发车即记让最坏频率=2h 一发。
+`runAfSearch` 发车时写 `lastAutoSearchAt/Tag`(手动抓取同样刷新): 搜索常只回旧帖(0 新帖), 若只在成功时记时, 失败/空转会每 30s 一 tick 地空烧限流桶; 发车即记让最坏频率=1h 一发。
 
 ## Considered Options
 
 - **搜索编排搬进 background SW**(彻底零页面): 否。MV3 SW 会被杀, 而 `runAfSearch` 含 429 退避等待(最长 3×15min); 仓库架构本就"长任务宿主在标签页"(background.js 头注), 收割小窗是例外不是先例。维持"任意 x.com 标签页"与"宿主离线则全插件暂停"的既有模型一致。
+- **补池只看"无到期帖"**: 否(2026-10-12 修订)。存活帖不足 `POOL_MIN(10)` 时供给即将枯竭(剩余帖子即使能重扫也产不出几个候选人), 等两天重扫不如直接抓新帖; 故断供判定 = 存活不足 **或** 无到期帖。
 - **无到期帖就无冷却直接抓**: 否。搜索第一页高度重叠(热门帖), 0 新帖是常态, 会退化成每 tick 一发的请求风暴。
 - **补池放在循环水位块内**: 否。队列见底时循环已退出(两队列空 → break), 循环内的检查永远等不到那一刻; autoTick 不依赖循环存活。
 
@@ -33,5 +35,5 @@ options 页用 `findXTab()` 转发 `af-search` 并携带 `tag`(详情 Tab 新增
 
 - 传输回退路径(页面重放)仍需页面捕获过 SearchTimeline 模板——Route 1 为主路径, 回退只在结构性缺料时发生, 报错信息已指引"打开互关标签页"。
 - 自动补池受领导权锁约束(acquireLock), 多标签页不会重复触发。
-- 队列见底 + 池子当日扫完的状态, 从"死等到用户想起来"变成"最多 2 小时后自愈"; 手动抓取立即满足需求并重置自动时钟。
-- 新增写死常量 `AF.AUTO_SEARCH_COOLDOWN_MS`(与 PENDING_TARGET 同一 ADR-0001 语境: 产品决策不进配置页)。
+- 队列见底 + 池子当日扫完/存活不足的状态, 从"死等到用户想起来"变成"最多 1 小时后自愈"; 手动抓取立即满足需求并重置自动时钟。
+- 新增写死常量 `AF.AUTO_SEARCH_COOLDOWN_MS`、`AF.POOL_MIN`(与 PENDING_TARGET 同一 ADR-0001 语境: 产品决策不进配置页)。
