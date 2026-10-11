@@ -50,4 +50,8 @@
   ②active:false 页签 visibilityState=hidden, x.com 路由级取数被可见性门控(应用启动但搜索不发)——
   非聚焦窗口内选中标签 visibility=visible, 不抢焦点照常发请求 ③await 漏写让轮询 Promise
   恒真值, "106ms 收满 3 发"秒关页面——逐轮诊断字段(rounds/winCreateMs)是抓出它的关键
-- 仍遗留: BlueVerifiedFollowers/回关动作仍走页面重放(后续可同法迁移)
+- BlueVerifiedFollowers 拉取已同法迁移(2026-10-11): route1-graphql 契约泛化成 vars 变量补丁
+  (mergeVariables 纯函数, null 值删键——screen_name 剔除/cursor 缺省删除), 实测页1直连 200、
+  页2+池空自动回退, 混合传输 cursor 连续(基准已统一)。拉粉节奏快(1~2s/页) tid 消耗大,
+  自动供血小窗只收 SearchTimeline 路径, 粉丝路径靠页面在场自然供血(回关循环本就要求页面开着)
+- 仍遗留: 回关动作 friendships/create.json 仍走页面重放(低频 3~8s 一发, 页面重放足够, 不急)
