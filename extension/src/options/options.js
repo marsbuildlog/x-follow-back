@@ -183,10 +183,12 @@
     }
     const searching = !!(afp && afp.running);
     const grabOK = !!tagTab && !searching;
+    const water = (af && af.state === 'running' && c.pending < RF.AF.PENDING_TARGET)
+      ? ` <span class="hint">(低于水位 ${RF.AF.PENDING_TARGET}, 循环顺路扫帖补员中)</span>` : '';
     el.innerHTML = `
       <h3><span class="dot" style="background:${st.color}"></span>主动关注任务 ${h ? `<span class="hint">@${esc(h)}</span>` : ''}<button class="more" data-goto="activefollow">详情 →</button></h3>
       <div>状态: <b>${esc(st.text)}</b>${searching ? ` <span style="color:#7c3aed;font-weight:700">· 抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>` : ''}${loopWaitChip()}</div>
-      <div>待关注 <span class="num">${c.pending}</span> / 队列 ${q.length} · 帖子池 ${poolTotal}${poolDue ? `(待扫 ${poolDue})` : ''}</div>
+      <div>待关注 <span class="num">${c.pending}</span> / 队列 ${q.length} · 帖子池 ${poolTotal}${poolDue ? `(待扫 ${poolDue})` : ''}${water}</div>
       ${h ? taskCardOps('af', af, grabOK) : '<div class="hint">打开 x.com 登录后自动识别账号</div>'}
     `;
   }
@@ -304,7 +306,7 @@
         poolRows.push({ tag, ...p });
       }
     }
-    poolRows.sort((a, b) => a.nextScanAt - b.nextScanAt);
+    poolRows.sort((a, b) => (b.replyCount || 0) - (a.replyCount || 0) || a.nextScanAt - b.nextScanAt);
     const searching = !!(afp && afp.running);
     const finishedFresh = afp && afp.running === false && afp.finishedAt && Date.now() - afp.finishedAt < 120_000;
     const searchChip = searching
@@ -331,7 +333,7 @@
       .slice(0, MAX_ROWS)
       .map((p) => {
         const ps = poolStatus(p);
-        return `<tr><td>#${esc(p.tag)}</td><td>${postLink(p.postId)}</td><td style="color:${ps.c}">${ps.t}</td><td>${p.scanCount}/${RF.AF.SCAN_MAX}</td><td>${fmtWhen(p.lastScanAt)}</td><td>${fmtWhen(p.nextScanAt)}</td></tr>`;
+        return `<tr><td>#${esc(p.tag)}</td><td>${postLink(p.postId)}</td><td>${p.replyCount ?? '—'}</td><td style="color:${ps.c}">${ps.t}</td><td>${p.scanCount}/${RF.AF.SCAN_MAX}</td><td>${fmtWhen(p.lastScanAt)}</td><td>${fmtWhen(p.nextScanAt)}</td></tr>`;
       }).join('');
     $('pool-summary').textContent = filtered.length
       ? (filtered.length > MAX_ROWS ? `仅显示前 ${MAX_ROWS} 条 / 共 ${filtered.length} 条 · ` : '') + `共 ${poolTotal} 帖 · 待扫 ${poolDue}`

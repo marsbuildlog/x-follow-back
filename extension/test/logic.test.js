@@ -9,7 +9,7 @@ const {
   mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
   rateLimitBackoffMs, windowExhaustedWaitMs,
   parseSearchTimeline, passesRatio, afEligible, pickNextItem,
-  mergeAfCandidates, upsertPosts, duePost, markScanned,
+  mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
 } = globalThis.XFollowBackLogic;
 
 // ---------- 测试工具 ----------
@@ -463,6 +463,37 @@ test('upsertPosts/duePost/markScanned: 去重、到期调度、三次封顶', ()
   markScanned(q2, now + 5 * 86400_000, 2 * 86400_000);
   markScanned(q2, now + 7 * 86400_000, 2 * 86400_000);
   assert.equal(duePost(pool, now + 100 * 86400_000, 3), null);
+});
+
+test('duePostAcrossTags: 跨标签取最早到期帖', () => {
+  const now = 1_000_000_000_000;
+  const tags = { '蓝V互关': { posts: [] }, '其他': { posts: [] } };
+  upsertPosts(tags['蓝V互关'].posts, ['a1', 'a2'], now);
+  upsertPosts(tags['其他'].posts, ['b1'], now + 60_000); // 晚一分钟到期
+  const hit = duePostAcrossTags(tags, now + 60_000, 3);
+  assert.equal(hit.tag, '蓝V互关');
+  assert.equal(hit.post.postId, 'a1');
+  // 蓝V互关 全部扫完(隔两天再到期) → 落到其他标签
+  for (const p of tags['蓝V互关'].posts) markScanned(p, now + 60_000, 2 * 86400_000);
+  assert.equal(duePostAcrossTags(tags, now + 60_000, 3).tag, '其他');
+  assert.equal(duePostAcrossTags(tags, now + 60_000, 3).post.postId, 'b1');
+  // 全部不到期 → null
+  markScanned(tags['其他'].posts[0], now + 60_000, 2 * 86400_000);
+  assert.equal(duePostAcrossTags(tags, now + 60_000, 3), null);
+});
+
+test('duePost/upsertPosts: 评论数大的优先扫描, 帖池存评论数', () => {
+  const now = 1_000_000_000_000;
+  const pool = [];
+  upsertPosts(pool, ['old'], now);                                    // 旧格式(无评论数)
+  upsertPosts(pool, [{ postId: 'old', replyCount: 30 }], now + 1);   // 重见时回填
+  assert.equal(pool.find((p) => p.postId === 'old').replyCount, 30);
+  upsertPosts(pool, [{ postId: 'low', replyCount: 2 }, { postId: 'high', replyCount: 50 }], now);
+  assert.equal(duePost(pool, now + 2, 3).postId, 'high');
+  // 扫完 high(隔两天到期) → 按评论数: old(30) 优先于 low(2)
+  markScanned(pool.find((p) => p.postId === 'high'), now, 2 * 86400_000);
+  assert.equal(duePost(pool, now + 2, 3).postId, 'old');
+  assert.equal(duePost(pool, now + 2 * 86400_000, 3).postId, 'high'); // high 隔两天重扫再排前
 });
 
 // ---------- interpret: 160 已关注 → skipped 语义 ----------

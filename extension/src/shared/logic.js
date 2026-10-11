@@ -237,8 +237,14 @@
       const counts = u.relationship_counts || {};
       const persp = u.relationship_perspectives || {};
       const num = (v) => (Number.isFinite(v) ? v : null);
+      // 评论数(回复数)多代 schema: 旧版 legacy.reply_count; 新版顶层 comment_count
+      const replyCount = num(
+        legacy.reply_count ?? tr.comment_count ?? tr.core?.comment_count ??
+        tr.tweet?.legacy?.reply_count ?? tr.tweet?.comment_count
+      );
       out.items.push({
         postId: String(tr.rest_id || legacy.id_str || ''),
+        replyCount,
         isRetweet: !!(legacy.retweeted_status_result),
         user: {
           userId: u.rest_id || u.core?.id_str,
@@ -330,16 +336,34 @@
   }
 
   // 互关帖池: 按 postId 去重追加新帖(首次发现即视为扫描到期); 返回新增数
-  function upsertPosts(pool, postIds, now) {
+  function upsertPosts(pool, items, now) {
     const seen = new Set(pool.map((p) => p.postId));
     let added = 0;
-    for (const id of postIds) {
-      if (!id || seen.has(id)) continue;
-      pool.push({ postId: id, firstSeenAt: now, scanCount: 0, lastScanAt: null, nextScanAt: now });
+    for (const it of items) {
+      const id = typeof it === 'string' ? it : it && it.postId;
+      if (!id || seen.has(id)) {
+        // 重见已存在的帖子: 回填旧条目缺失的评论数(改版前入库的条目没有该字段)
+        if (it && typeof it !== 'string' && Number.isFinite(it.replyCount)) {
+          const ex = pool.find((p) => p.postId === id);
+          if (ex && ex.replyCount == null) ex.replyCount = it.replyCount;
+        }
+        continue;
+      }
+      pool.push({
+        postId: id,
+        replyCount: it && Number.isFinite(it.replyCount) ? it.replyCount : null,
+        firstSeenAt: now, scanCount: 0, lastScanAt: null, nextScanAt: now,
+      });
       seen.add(id);
       added++;
     }
     return { added };
+  }
+
+  // 到期帖二选一: 评论数大的优先(缺省视为 0); 同数按到期先后
+  function dueBetter(a, b) {
+    const ra = a.replyCount || 0, rb = b.replyCount || 0;
+    return ra > rb || (ra === rb && a.nextScanAt < b.nextScanAt);
   }
 
   // 下一个到期的帖子: scanCount < SCAN_MAX 且 nextScanAt <= now, 按 nextScanAt 最早优先; 没有返回 null
@@ -347,7 +371,18 @@
     let best = null;
     for (const p of pool) {
       if (p.scanCount >= scanMax || p.nextScanAt > now) continue;
-      if (!best || p.nextScanAt < best.nextScanAt) best = p;
+      if (!best || dueBetter(p, best)) best = p;
+    }
+    return best;
+  }
+
+  // 跨标签取到期帖(与 duePost 同优先级: 评论数大优先, 同数按到期先后; 循环内扫描用:
+  // 不要求当前页面是某个标签页, Route 1 直连不挑场)
+  function duePostAcrossTags(tags, now, scanMax) {
+    let best = null;
+    for (const [tag, obj] of Object.entries(tags || {})) {
+      const p = duePost((obj && obj.posts) || [], now, scanMax);
+      if (p && (!best || dueBetter(p, best.post))) best = { tag, post: p };
     }
     return best;
   }
@@ -365,6 +400,6 @@
     mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
     rateLimitBackoffMs, windowExhaustedWaitMs,
     parseSearchTimeline, passesRatio, afEligible, pickNextItem,
-    mergeAfCandidates, upsertPosts, duePost, markScanned,
+    mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
   };
 })();

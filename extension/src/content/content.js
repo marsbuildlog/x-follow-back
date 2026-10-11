@@ -315,7 +315,7 @@
   // ---------- 通用工具 ----------
   // 纯逻辑(parseFollowers/interpret/mergeUsers/pickNextItem/...)在 shared/logic.js(顶部已显式 import), 有单元测试覆盖
   const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName, rateLimitBackoffMs, windowExhaustedWaitMs,
-    parseSearchTimeline, afEligible, pickNextItem, mergeAfCandidates, upsertPosts, duePost, markScanned } = L;
+    parseSearchTimeline, afEligible, pickNextItem, mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned } = L;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
   // 分段休眠(每段≤30s): 后台标签页的定时器会被 Chrome 节流到约1次/分钟,
@@ -645,7 +645,7 @@
         if (out.error) { await log(`搜索失败: ${out.error}`); return { ok: false, message: out.error }; }
         if (out.rateLimitedOut) { incomplete = true; await log('搜索连续限流, 本轮先合并已拉到的部分'); break; }
         for (const it of out.items) {
-          if (it.postId) postIds.push(it.postId);
+          if (it.postId) postIds.push({ postId: it.postId, replyCount: it.replyCount });
           if (!it.isRetweet) nonRtItems.push(it);
         }
         await store.set(K.afProgress, { tag, page: page + 1, maxPages: AF.SEARCH_MAX_PAGES, posts: postIds.length, running: true });
@@ -904,6 +904,21 @@
 
       while (true) {
         await refreshLock();
+
+        // 生产侧(水位驱动): 主动关注待关注低于水位线时, 循环顺路扫一帖到期帖。
+        // 与消费同循环串行 → 无锁竞争(旧机制扫描在 tick 里抢锁, 被回关循环饿死);
+        // 扫描走 Route 1, 不要求标签页在场。扫完本轮继续关注, 候选回填后自然提速
+        {
+          const afNow = await io.af.get(handle);
+          if (afNow.state === 'running') {
+            const pend = afNow.queue.filter((i) => i.status === 'pending').length;
+            if (pend < RFg.AF.PENDING_TARGET) {
+              const due = duePostAcrossTags(afNow.tags, Date.now(), RFg.AF.SCAN_MAX);
+              if (due) await runAfScanOne(due.tag, handle);
+            }
+          }
+        }
+
         // 逐条优先(ADR-0001): 每取下一个人先查回关队列, 空了才取主动关注队列
         let src, task, item;
         {
@@ -1075,10 +1090,10 @@
         if (await acquireLock()) resumeTask(h); // 恢复入口双任务同步
         return;
       }
-      // 到期帖扫描: 生产者, 与循环解耦(纯追加合并); 无到期帖时内部静默返回
-      if (document.visibilityState === 'visible') {
-        if (await acquireLock()) runAfScanOne(tag, h);
-      }
+      // 到期帖扫描: 生产者, 与循环解耦(纯追加合并); 无到期帖时内部静默返回。
+      // 不再要求页面可见: 扫描走 Route 1 直连, 后台标签页照样能发(定时器节流到 ~1次/分,
+      // 恰好匹配一 tick 一帖的节奏); 只要标签页存在即可
+      if (await acquireLock()) runAfScanOne(tag, h);
       return; // 标签页不做回关自动拉取(那是 verified_followers 页的事)
     }
 
