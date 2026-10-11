@@ -26,7 +26,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["src/shared/constants.js", "src/shared/logic.js", "src/shared/tidpool.js"],
+      "resources": ["src/shared/constants.js", "src/shared/logic.js", "src/shared/tidpool.js", "src/shared/route1.js"],
       "matches": ["https://x.com/*"]
     }
   ],

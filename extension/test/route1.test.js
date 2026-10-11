@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 require('../src/shared/route1.js');
-const { pickDirectHeaders, buildRequest, headerSets } = globalThis.RFRoute1;
+const { pickDirectHeaders, buildRequest, headerSets, mergeVariables } = globalThis.RFRoute1;
 
 // 基于 2026-10 实测形状构造的 GET 形态 SearchTimeline 模板(s 含首见 variables/features/fieldToggles)
 const TPL_GET = {
@@ -97,4 +97,29 @@ test('headerSets: POST 两种头集都补 content-type', () => {
 test('headerSets: GET 不混入 content-type(避免 GET 带 body 头)', () => {
   const { full } = headerSets({ 'content-type': 'application/json' }, 'B', 'C', 'T', false);
   assert.equal(full['content-type'], undefined);
+});
+
+test('mergeVariables: 补丁覆盖首见形状', () => {
+  assert.deepEqual(
+    mergeVariables({ userId: '1', count: 20 }, { count: 100 }),
+    { userId: '1', count: 100 }
+  );
+});
+
+test('mergeVariables: null 值删键(screen_name 剔除/缺省 cursor 删除)', () => {
+  const out = mergeVariables(
+    { userId: '1', count: 20, screen_name: 'usera', cursor: 'old' },
+    { count: 100, screen_name: null, cursor: null }
+  );
+  assert.deepEqual(out, { userId: '1', count: 100 });
+});
+
+test('mergeVariables: cursor 有值则带上(翻页)', () => {
+  const out = mergeVariables({ userId: '1', count: 20 }, { cursor: 'DAADDAAB' });
+  assert.deepEqual(out, { userId: '1', count: 20, cursor: 'DAADDAAB' });
+});
+
+test('mergeVariables: v0 缺省也能构造(纯补丁)', () => {
+  assert.deepEqual(mergeVariables(null, { a: 1, b: null }), { a: 1 });
+  assert.deepEqual(mergeVariables(undefined, {}), {});
 });

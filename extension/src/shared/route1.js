@@ -52,5 +52,15 @@
     return { full, minimal: triple };
   }
 
-  globalThis.RFRoute1 = { ORIGIN, SKIP_HEADERS, pickDirectHeaders, buildRequest, headerSets };
+  // 变量合成: 首见形状 + 补丁; 补丁里显式 null 的键删除
+  //   (followers 的 screen_name 必须删、缺省 cursor 必须删; 搜索的 cursor 同理)
+  function mergeVariables(v0, patch) {
+    const out = Object.assign({}, v0 || {});
+    for (const k of Object.keys(patch || {})) {
+      if (patch[k] == null) delete out[k]; else out[k] = patch[k];
+    }
+    return out;
+  }
+
+  globalThis.RFRoute1 = { ORIGIN, SKIP_HEADERS, pickDirectHeaders, buildRequest, headerSets, mergeVariables };
 })();

@@ -19,6 +19,7 @@
     await import(chrome.runtime.getURL('src/shared/constants.js'));
     await import(chrome.runtime.getURL('src/shared/logic.js'));
     await import(chrome.runtime.getURL('src/shared/tidpool.js'));
+    await import(chrome.runtime.getURL('src/shared/route1.js'));
   } catch (e) {
     throw new Error('[XFollowBack] 依赖模块动态加载失败: ' + ((e && e.message) || e));
   }
@@ -337,13 +338,10 @@
     if (!screenName) return { ok: false, message: '缺少 screenName' };
     fetchingFollowers = true;
     try {
-      const cap = await callPage('list-captured', {});
-      const entry = (cap.operations || []).find((o) => o.operationName === OP_FOLLOWERS);
-      if (!entry) {
-        const msg = `未捕获到 ${OP_FOLLOWERS} 请求——请先打开 /${screenName}/verified_followers 页面并等它加载完`;
-        await log('⚠ ' + msg);
-        return { ok: false, message: msg };
-      }
+      // Route 1 优先(ADR-0004): 材料全在 storage, 不依赖本页捕获过模板; 结构性缺料才回退页面重放。
+      // 变量基准两路径同源(rf_tpl 首见形状), 翻页 cursor 绑定会话基准(见 searchPage 同款修复)
+      let entry = null;   // 页面捕获模板(回退路径用, 首次回退时惰性获取)
+      let r1Base = null;  // rf_tpl 首见变量形状(回退路径的基准, 与 Route 1 同源)
 
       // 计时起点: 手动/自动一视同仁, 成功失败都算(失败也等下一个周期再试, 避免连打)
       const t0 = await getTask(screenName);
@@ -359,9 +357,24 @@
       let retries = 0;
       let incomplete = false;
       while (page < MAX_PAGES) {
-        const variables = { ...(entry.variables || {}), count, cursor };
-        delete variables.screen_name;
-        const res = await callGraphQL(OP_FOLLOWERS, variables);
+        // Route 1: background 直连(screen_name 剔除/缺省 cursor 删除用 null 删键语义表达)
+        let res = await sendBg({ cmd: 'route1-graphql', op: OP_FOLLOWERS, vars: { count, screen_name: null, cursor: cursor || null } });
+        if (res && res.error) {
+          await log(`Route 1 不可用(${res.error}), 本发回退页面重放`);
+          if (!entry) {
+            const cap = await callPage('list-captured', {});
+            entry = (cap.operations || []).find((o) => o.operationName === OP_FOLLOWERS);
+            if (!entry) {
+              const msg = `Route 1 不可用且未捕获到 ${OP_FOLLOWERS} 请求——请先打开 /${screenName}/verified_followers 页面并等它加载完`;
+              await log('⚠ ' + msg);
+              return { ok: false, message: msg };
+            }
+            const { [K.gqlTpl + ':' + OP_FOLLOWERS]: r1Tpl } = await chrome.storage.local.get(K.gqlTpl + ':' + OP_FOLLOWERS);
+            r1Base = (r1Tpl && r1Tpl.v0) || null;
+          }
+          const fvars = globalThis.RFRoute1.mergeVariables(r1Base || entry.variables, { count, screen_name: null, cursor: cursor || null });
+          res = await callGraphQL(OP_FOLLOWERS, fvars);
+        }
         if (res.status === 429) {
           // 拉取被限流: 等 reset 后重试同一页; 连续3次仍限流 → 先合并已拉到的部分
           if (++retries > 3) {
@@ -516,7 +529,7 @@
       lastSearchFireAt = Date.now();
 
       // Route 1: background 直连
-      let res = await sendBg({ cmd: 'route1-graphql', op: OP_SEARCH, rawQuery, count: AF.SEARCH_PAGE_SIZE, cursor: cursor || null });
+      let res = await sendBg({ cmd: 'route1-graphql', op: OP_SEARCH, vars: { rawQuery, count: AF.SEARCH_PAGE_SIZE, cursor: cursor || null } });
       const viaRoute1 = !!(res && !res.error);
       let poolTid = null, searchPath = null, entry = null;
       if (!viaRoute1) {

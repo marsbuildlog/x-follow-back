@@ -19,8 +19,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg.cmd === 'route1-graphql') {
-    // content 平铺传参(rawQuery/count/cursor 在顶层), 在这里收拢成 query 对象
-    route1Graphql(msg.op, { rawQuery: msg.rawQuery, count: msg.count, cursor: msg.cursor })
+    // vars = 变量补丁(含 null 值删键语义, 见 RFRoute1.mergeVariables)
+    route1Graphql(msg.op, msg.vars || {})
       .then(sendResponse)
       .catch((e) => sendResponse({ error: String((e && e.message) || e) }));
     return true;
@@ -195,7 +195,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 
 // Route 1 正式发射(扫描/搜索循环用): minimal 三件套(2026-10-11 对照实验双 200, 页面原头非必需)。
 // 返回 {status, ok, body, rl} 或 {error}(结构性缺料/网络异常——调用方据此回退页面重放; HTTP 错误不算 error)。
-async function route1Graphql(op, query) {
+async function route1Graphql(op, vars) {
   const tplKey = TPL_PREFIX + op;
   const { [tplKey]: tpl } = await chrome.storage.local.get(tplKey);
   if (!tpl || !tpl.p || !tpl.v0) return { error: `rf_tpl:${op} 模板未旁听到或缺变量形状` };
@@ -210,9 +210,8 @@ async function route1Graphql(op, query) {
     harvestBoost('池见底').catch(() => {}); // 异步供血(本发照常报错走回退, 下几发受益)
     return { error: '池中无同路径可用 tid(全在冷却)' };
   }
-  // 变量 = 首见形状 + 本次业务参数(rawQuery/count/cursor), 与页面重放同构
-  const variables = Object.assign({}, tpl.v0, { rawQuery: query.rawQuery, count: query.count || 20 });
-  if (query.cursor) variables.cursor = query.cursor; else delete variables.cursor;
+  // 变量 = 首见形状 + 补丁(null 值删键: cursor 缺省/screen_name 等由调用方表达)
+  const variables = globalThis.RFRoute1.mergeVariables(tpl.v0, vars);
   const req = globalThis.RFRoute1.buildRequest(tpl, variables);
   const headers = globalThis.RFRoute1.headerSets(tpl.h, bearer, ck.value, tidEntry.t, req.isPost).minimal;
   const ac = new AbortController();
