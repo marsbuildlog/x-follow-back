@@ -404,17 +404,17 @@
     return { added };
   }
 
-  // 到期帖二选一(产人优先新帖): 未首扫 > 重扫; 同档按帖子新旧(雪花 postId 越大越新);
-  // 同帖再按评论数大优先。互关帖生命周期短, 老热帖按到期 FIFO / 评论数霸占扫描会饿死新帖。
+  // 到期帖二选一(产人优先新帖): 未首扫 > 重扫; 同档评论数大优先(候选人更多);
+  // 同评论数再按帖子新旧(雪花 postId 越大越新)。未首扫档挡住老热帖霸占扫描。
   function dueBetter(a, b) {
     const aFresh = (a.scanCount || 0) === 0;
     const bFresh = (b.scanCount || 0) === 0;
     if (aFresh !== bFresh) return aFresh;
-    if (a.postId !== b.postId) {
-      try { return BigInt(a.postId) > BigInt(b.postId); }
-      catch { return String(a.postId) > String(b.postId); }
-    }
-    return (a.replyCount || 0) > (b.replyCount || 0);
+    const ra = a.replyCount || 0, rb = b.replyCount || 0;
+    if (ra !== rb) return ra > rb;
+    if (a.postId === b.postId) return false;
+    try { return BigInt(a.postId) > BigInt(b.postId); }
+    catch { return String(a.postId) > String(b.postId); }
   }
 
   // 下一个到期的帖子: scanCount < SCAN_MAX 且 nextScanAt <= now; 优先级见 dueBetter; 没有返回 null
@@ -427,7 +427,7 @@
     return best;
   }
 
-  // 跨标签取到期帖(与 duePost 同优先级: 新帖优先; 循环内扫描用:
+  // 跨标签取到期帖(与 duePost 同优先级: 未首扫优先, 同档评论数大; 循环内扫描用:
   // 不要求当前页面是某个标签页, Route 1 直连不挑场)
   function duePostAcrossTags(tags, now, scanMax) {
     let best = null;
@@ -472,20 +472,22 @@
     return now - (af.lastAutoSearchAt || 0) >= cooldownMs;
   }
 
-  // 手动关注失败是否属于"额度不足"类: 429(接口限流)或 403 包 161(单日关注上限)/88(限流)。
+  // 手动关注失败是否属于"额度不足"类: 429(接口限流)或错误码 161(单日上限)/88(限流)。
+  // 161/88 不绑 HTTP 状态——GraphQL 关注 mutation 常 200 包 errors[{code:161}]。
   // 只有这类失败值得收进稍后关注队列(额度恢复后补关注);
   // 160 已关注/保护账号/封禁等失败没有补关注价值, 不收。
   // status 传 HTTP 状态码, bodyText 传响应原文(可能不是 JSON)。
   function isFollowLimitFailure(status, bodyText) {
     if (status === 429) return true;
-    if (status !== 403) return false;
     const text = bodyText || '';
     let code = null;
     try {
       const errs = (JSON.parse(text) || {}).errors;
       if (Array.isArray(errs) && errs.length) code = errs[0].code;
     } catch {}
-    return code === 161 || code === 88 || /unable to follow more|follow limit|rate limit/i.test(text);
+    if (code === 161 || code === 88) return true;
+    if (status !== 403) return false;
+    return /unable to follow more|follow limit|rate limit/i.test(text);
   }
 
   // 扫描完成后: 计数+1, 隔 SCAN_INTERVAL_MS 重扫; 到达上限后不再到期(duePost 已滤)

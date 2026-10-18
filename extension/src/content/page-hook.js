@@ -8,11 +8,27 @@
 //     - list-captured: 返回捕获摘要(不含请求头)
 //     - graphql: 用捕获头模板重放 GraphQL 查询(替换 variables)
 //     - api: 用捕获头模板重放 REST 请求(替换指定参数)
+//     - take-failed-follows: 取走手动关注撞额度失败(ADR-0007)
 // 所有请求都在页面上下文里发出, 自带 cookie + 页面级请求头。
 (() => {
   'use strict';
-  if (window.__xfollowbackHook) return;
+  // 版本化热升级: 扩展 reload 后 options 会 scripting 补注入本文件。
+  // 旧逻辑用 `if (__xfollowbackHook) return` 会永远留在无 take-failed-follows 的旧 hook 上,
+  // 手动关注兑底表现为"失败了也不入队"。版本不一致时拆回原生 API 再装新版。
+  const HOOK_VERSION = 5;
+  if (window.__xfollowbackHookVersion === HOOK_VERSION) return;
+  if (window.__xfollowbackOrigFetch) window.fetch = window.__xfollowbackOrigFetch;
+  if (window.__xfollowbackOrigXHR) {
+    const o = window.__xfollowbackOrigXHR;
+    XMLHttpRequest.prototype.open = o.open;
+    XMLHttpRequest.prototype.setRequestHeader = o.setRequestHeader;
+    XMLHttpRequest.prototype.send = o.send;
+  }
+  if (window.__xfollowbackOnMessage) {
+    window.removeEventListener('message', window.__xfollowbackOnMessage);
+  }
   window.__xfollowbackHook = true;
+  window.__xfollowbackHookVersion = HOOK_VERSION;
 
   const registry = new Map(); // 'g:<OpName>' | 'p:<path>' -> entry
   const history = [];         // GraphQL 捕获流水(调试用)
@@ -33,6 +49,37 @@
   // 页面保留路径(不是 handle): pathname 兑底 screen_name 时排除
   const RESERVED_HANDLES_PAGE = new Set(['i', 'home', 'explore', 'notifications', 'messages', 'settings', 'search', 'hashtag']);
 
+  // 请求 body → 字符串(页面可能传 URLSearchParams, 旧逻辑只收 string 会丢 user_id → no-id)
+  function coerceBodySync(body) {
+    if (body == null) return null;
+    if (typeof body === 'string') return body;
+    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return body.toString();
+    try {
+      if (typeof body.toString === 'function') {
+        const s = body.toString();
+        if (s && !/^\[object /.test(s)) return s;
+      }
+    } catch {}
+    return null;
+  }
+
+  // 额度类失败判定: 优先 logic.js; 缺省时内联兜底(options 补注入曾只带 page-hook 不带 logic)
+  function limitFail(status, bodyText) {
+    try {
+      const fn = globalThis.XFollowBackLogic && globalThis.XFollowBackLogic.isFollowLimitFailure;
+      if (fn) return !!fn(status, bodyText);
+    } catch {}
+    if (status === 429) return true;
+    const text = bodyText || '';
+    let code = null;
+    try {
+      const errs = (JSON.parse(text) || {}).errors;
+      if (Array.isArray(errs) && errs.length) code = errs[0].code;
+    } catch {}
+    if (code === 161 || code === 88) return true;
+    return status === 403 && /unable to follow more|follow limit|rate limit/i.test(text);
+  }
+
   // 从请求里提取目标用户(兼容 form(user_id=..) / JSON / GraphQL variables 三种形态)
   function extractFollowTarget(item) {
     const raw = typeof item.body === 'string' ? item.body : '';
@@ -51,11 +98,17 @@
           screenName = o?.screen_name ?? o?.screenName ?? null;
         } catch {}
       }
-      return { fmt, userId, screenName, reqHead: raw.slice(0, 120) };
+      return { fmt, userId: userId != null ? String(userId) : null, screenName, reqHead: raw.slice(0, 120) };
     }
     if (item.variables) {
       const v = item.variables || {};
-      return { fmt: 'graphql', userId: v.user_id ?? v.userId ?? null, screenName: v.screen_name ?? v.screenName ?? null, reqHead: '' };
+      const userId = v.user_id ?? v.userId ?? null;
+      return {
+        fmt: 'graphql',
+        userId: userId != null ? String(userId) : null,
+        screenName: v.screen_name ?? v.screenName ?? null,
+        reqHead: '',
+      };
     }
     return { fmt: 'empty', userId: null, screenName: null, reqHead: '' };
   }
@@ -84,7 +137,7 @@
           }
         } catch {}
       }
-      const limit = !!globalThis.XFollowBackLogic.isFollowLimitFailure(status, bodyText);
+      const limit = limitFail(status, bodyText);
       const note = !t.userId && !t.screenName ? 'no-id' : !limit ? 'not-limit' : 'captured';
       followDiag.push({
         ts: Date.now(), status, fmt: t.fmt, note, userId: t.userId, screenName: t.screenName,
@@ -201,7 +254,7 @@
         path: u.pathname,
         url: u.origin + u.pathname,
         search: u.search,
-        body: typeof (init && init.body) === 'string' ? init.body : null,
+        body: coerceBodySync(init && init.body),
         headers,
         capturedAt: ts,
       };
@@ -217,6 +270,7 @@
 
   // ---- hook fetch ----
   const origFetch = window.fetch;
+  window.__xfollowbackOrigFetch = origFetch;
   if (origFetch) {
     window.fetch = function (input, init) {
       let item = null;
@@ -225,11 +279,14 @@
         if (url) {
           let headers = init && init.headers;
           let method = init && init.method;
-          if ((!headers || !method) && typeof Request !== 'undefined' && input instanceof Request) {
+          let body = init && init.body;
+          if (typeof Request !== 'undefined' && input instanceof Request) {
             headers = headers || input.headers;
             method = method || input.method;
+            // Request 上的 body 无法同步读; 仅当 init 未带 body 时保持 null(create.json 实测走 init.body)
+            if (body == null) body = undefined;
           }
-          item = record(url, { ...init, headers, method });
+          item = record(url, { ...(init || {}), headers, method, body });
         }
       } catch {}
       const p = origFetch.apply(this, arguments);
@@ -238,9 +295,21 @@
           item.status = res && res.status;
           try {
             // 手动关注失败捕获: REST(create.json)与 GraphQL(关注 mutation)都看; 读响应体判断额度类失败(clone 后读, 不消费原响应流)
+            // GraphQL 常 HTTP 200 包 errors[{code:161}]——!res.ok 不够, 关注 mutation 成功响应也扫一眼 body
             const isFollowApi = item.path === FOLLOW_PATH || (item.opName && /friendship/i.test(item.opName));
-            if (res && !res.ok && isFollowApi) {
-              res.clone().text().then((t) => noteFollowResult(item, res.status, t)).catch(() => {});
+            if (res && isFollowApi) {
+              res.clone().text().then((t) => {
+                if (!res.ok) {
+                  noteFollowResult(item, res.status, t);
+                  return;
+                }
+                if (item.opName && /friendship/i.test(item.opName)) {
+                  try {
+                    const errs = (JSON.parse(t) || {}).errors;
+                    if (Array.isArray(errs) && errs.length) noteFollowResult(item, res.status, t);
+                  } catch {}
+                }
+              }).catch(() => {});
             }
             if (res && res.ok && item.opName === 'Viewer') {
               res.clone().text().then(sniffViewer).catch(() => {});
@@ -257,6 +326,7 @@
   const origOpen = XHR.open;
   const origSetHeader = XHR.setRequestHeader;
   const origSend = XHR.send;
+  window.__xfollowbackOrigXHR = { open: origOpen, setRequestHeader: origSetHeader, send: origSend };
   XHR.open = function (method, url) {
     this.__rf = { method, url, headers: {} };
     return origOpen.apply(this, arguments);
@@ -272,7 +342,7 @@
         item = record(this.__rf.url, {
           method: this.__rf.method,
           headers: this.__rf.headers,
-          body: typeof body === 'string' ? body : undefined,
+          body: coerceBodySync(body) || undefined,
         });
       }
     } catch {}
@@ -307,8 +377,8 @@
     return rl;
   }
 
-  // ---- 消息响应 ----
-  window.addEventListener('message', async (ev) => {
+  // ---- 消息响应(单例: 热升级时先 remove 旧 listener, 避免 list-captured 双回包) ----
+  const onMessage = async (ev) => {
     if (ev.source !== window) return;
     const msg = ev.data;
     if (!msg || msg.source !== 'xfollowback-ui') return;
@@ -337,7 +407,7 @@
           });
         }
       }
-      reply({ hookVersion: 4, operations: gOps, apiEndpoints, history, recent });
+      reply({ hookVersion: HOOK_VERSION, operations: gOps, apiEndpoints, history, recent });
       return;
     }
 
@@ -447,5 +517,7 @@
         reply({ status: -1, ok: false, body: String(e) });
       }
     }
-  });
+  };
+  window.__xfollowbackOnMessage = onMessage;
+  window.addEventListener('message', onMessage);
 })();

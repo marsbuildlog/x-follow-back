@@ -496,7 +496,7 @@ test('mergeAfCandidates: 追加带来源, 剔除已有与回关队列, 达上限
 test('upsertPosts/duePost/markScanned: 去重、到期调度、三次封顶', () => {
   const pool = [];
   const now = 1_000_000_000_000;
-  // 雪花 ID: 数值越大越新; duePost 在同档(均未首扫)取更新者
+  // 同档无评论数时退化为雪花新→旧
   assert.equal(upsertPosts(pool, ['100', '200', '100'], now).added, 2);
   assert.equal(upsertPosts(pool, ['100'], now).added, 0);
   const p = duePost(pool, now, 3);
@@ -520,14 +520,14 @@ test('upsertPosts/duePost/markScanned: 去重、到期调度、三次封顶', ()
   assert.equal(duePost(pool, now + 100 * 86400_000, 3), null);
 });
 
-test('duePostAcrossTags: 跨标签取最优到期帖(新帖/新雪花优先)', () => {
+test('duePostAcrossTags: 跨标签取最优到期帖(未首扫优先, 同档评论数/雪花)', () => {
   const now = 1_000_000_000_000;
   const tags = { '蓝V互关': { posts: [] }, '其他': { posts: [] } };
   upsertPosts(tags['蓝V互关'].posts, ['100', '200'], now);
   upsertPosts(tags['其他'].posts, ['150'], now + 60_000); // 晚入池, 雪花介于两者之间
   const hit = duePostAcrossTags(tags, now + 60_000, 3);
   assert.equal(hit.tag, '蓝V互关');
-  assert.equal(hit.post.postId, '200'); // 全池最新雪花
+  assert.equal(hit.post.postId, '200'); // 同评论数(均缺省)→最新雪花
   // 蓝V互关 全部扫完(隔两天再到期) → 落到其他标签未首扫帖
   for (const p of tags['蓝V互关'].posts) markScanned(p, now + 60_000, 2 * 86400_000);
   assert.equal(duePostAcrossTags(tags, now + 60_000, 3).tag, '其他');
@@ -537,23 +537,23 @@ test('duePostAcrossTags: 跨标签取最优到期帖(新帖/新雪花优先)', (
   assert.equal(duePostAcrossTags(tags, now + 60_000, 3), null);
 });
 
-test('duePost/upsertPosts: 未首扫新帖优先于老热帖重扫; 同档新雪花优先; 帖池存评论数', () => {
+test('duePost/upsertPosts: 未首扫优先; 同档评论数大先扫; 帖池存评论数', () => {
   const now = 1_000_000_000_000;
   const pool = [];
   upsertPosts(pool, ['100'], now);                                    // 旧格式(无评论数)
   upsertPosts(pool, [{ postId: '100', replyCount: 90 }], now + 1);   // 重见时回填
   assert.equal(pool.find((p) => p.postId === '100').replyCount, 90);
-  // 老帖已首扫过但仍到期 + 新帖评论很少: 新帖优先(不再被评论数霸占)
+  // 老帖已首扫过但仍到期 + 新帖: 未首扫档优先(不被老帖 90 评论霸占)
   markScanned(pool[0], now, 0); // scanCount=1, nextScanAt=now → 立刻到期
   upsertPosts(pool, [{ postId: '300', replyCount: 2 }, { postId: '200', replyCount: 50 }], now);
-  assert.equal(duePost(pool, now + 2, 3).postId, '300'); // 未首扫里最新雪花
-  markScanned(pool.find((p) => p.postId === '300'), now, 2 * 86400_000);
-  assert.equal(duePost(pool, now + 2, 3).postId, '200'); // 剩未首扫 200
+  assert.equal(duePost(pool, now + 2, 3).postId, '200'); // 未首扫里评论数 50 > 2
   markScanned(pool.find((p) => p.postId === '200'), now, 2 * 86400_000);
-  // 未首扫清空 → 落到已扫老帖; 同档重扫按雪花新→旧(200>100), 不按评论数
-  assert.equal(duePost(pool, now + 2, 3).postId, '100'); // 仅 100 仍到期(刚 markScanned 的 nextScanAt 在两天后)
-  // 两天后三帖都重扫到期: 200 > 100(雪花), 300 也到期且最新
-  assert.equal(duePost(pool, now + 2 * 86400_000, 3).postId, '300');
+  assert.equal(duePost(pool, now + 2, 3).postId, '300'); // 剩未首扫 300
+  markScanned(pool.find((p) => p.postId === '300'), now, 2 * 86400_000);
+  // 未首扫清空 → 落到已扫老帖 100
+  assert.equal(duePost(pool, now + 2, 3).postId, '100');
+  // 两天后三帖都重扫到期: 同档按评论数 90 > 50 > 2 → 100
+  assert.equal(duePost(pool, now + 2 * 86400_000, 3).postId, '100');
 });
 
 // ---------- interpret: 160 已关注 → skipped 语义 ----------
@@ -694,6 +694,9 @@ test('isFollowLimitFailure: 403 包 160(已关注)/保护账号等 → 不是额
 test('isFollowLimitFailure: 429 直接算; 文本兕底(非 JSON 错误页带限流字样)也算', () => {
   assert.equal(isFollowLimitFailure(429, ''), true);
   assert.equal(isFollowLimitFailure(403, 'unable to follow more people'), true);
-  assert.equal(isFollowLimitFailure(404, JSON.stringify({ errors: [{ code: 161 }] })), false); // 非 403/429 不收
+  // GraphQL 关注常 200 包 errors[{code:161}]——按错误码收, 不绑 403
+  assert.equal(isFollowLimitFailure(200, JSON.stringify({ errors: [{ code: 161 }] })), true);
+  assert.equal(isFollowLimitFailure(404, JSON.stringify({ errors: [{ code: 161 }] })), true);
   assert.equal(isFollowLimitFailure(200, ''), false);
+  assert.equal(isFollowLimitFailure(404, JSON.stringify({ errors: [{ code: 160 }] })), false);
 });

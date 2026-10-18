@@ -300,17 +300,19 @@
         poolRows.push({ tag, ...p });
       }
     }
-    // 与 dueBetter 同序: 未首扫 > 重扫; 同档雪花新→旧; 再按评论数
+    // 与 dueBetter 同序: 未首扫 > 重扫; 同档评论数大→小; 再按雪花新→旧
     poolRows.sort((a, b) => {
       const af = (a.scanCount || 0) === 0 ? 1 : 0, bf = (b.scanCount || 0) === 0 ? 1 : 0;
       if (af !== bf) return bf - af;
+      const rc = (b.replyCount || 0) - (a.replyCount || 0);
+      if (rc) return rc;
       try {
         const d = BigInt(b.postId) - BigInt(a.postId);
         if (d !== 0n) return d > 0n ? 1 : -1;
       } catch {
         if (a.postId !== b.postId) return a.postId < b.postId ? 1 : -1;
       }
-      return (b.replyCount || 0) - (a.replyCount || 0);
+      return 0;
     });
     const searching = !!(afp && afp.running);
     const finishedFresh = afp && afp.running === false && afp.finishedAt && Date.now() - afp.finishedAt < 120_000;
@@ -401,8 +403,13 @@
     if (Date.now() - lastInjectAt < 10_000) return;
     lastInjectAt = Date.now();
     try {
-      // 先 MAIN world 恢复请求捕获(page-hook 自带去重守卫), 再隔离世界接管 UI 与任务
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/page-hook.js'], world: 'MAIN' });
+      // MAIN world: logic.js(供 isFollowLimitFailure/buildApiRequest) + page-hook(版本化可热升级)。
+      // ⚠ 只注入 page-hook 会导致 XFollowBackLogic 缺失, 手动关注兑底静默失败。
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['src/shared/logic.js', 'src/content/page-hook.js'],
+        world: 'MAIN',
+      });
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/content.js'] });
       setTimeout(() => enrichFromPage(), 3000); // 注入完成后复查模板状态
     } catch {}

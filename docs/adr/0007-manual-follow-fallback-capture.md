@@ -28,4 +28,5 @@
 
 - 额度恢复的唤醒依赖既有机制: 161 会触发循环级暂停+每小时自动探测恢复(ADR-0001), 队列里的人届时按节奏被补关注;
 - 若对方在额度恢复前改名/注销, 关注会以 userId 重试失败并标记 failed(队列可见), 无额外处理;
-- page-hook `hookVersion` 3→4; `recent` 流水里关注路径额外携带 body(含 user_id, 无凭证), 仅用于失败捕获。
+- page-hook `hookVersion` 3→4→5; `recent` 流水里关注路径额外携带 body(含 user_id, 无凭证), 仅用于失败捕获。
+- v5 热升级: 扩展 reload 后可拆旧 hook 重装(不再被 `__xfollowbackHook` 早退卡死); options 补注入必须带 `logic.js`+`page-hook.js`。
