@@ -173,6 +173,10 @@
         <div class="hint">每次回关之间随机等待这个区间, 模拟人工节奏(默认 3~8 秒)</div>
       </div>
       <div class="set">
+        <div class="set-line">人为冷却 <input type="number" id="s-humanCooldownMin" min="0" max="10" step="1" /> 分钟</div>
+        <div class="hint">429 恢复后再额外等待；0 关闭</div>
+      </div>
+      <div class="set">
         <div class="set-line">自动拉取间隔 <input type="number" id="s-autoFetchMin" /> 分钟</div>
         <div class="hint">打开认证粉丝页且距上次拉取超过该时长时自动补拉新粉; 点「更新列表」会重新计时(默认 30 分钟)</div>
       </div>
@@ -187,7 +191,7 @@
       <span id="settings-result" class="hint"></span>
     </section>
     <div class="hint">
-      其余保护机制(限流退避、连续失败熔断、模板过期暂停等)自动运行, 无需配置; 暂停时会发系统通知。
+      其余保护机制(无 reset 头时的固定退避、连续失败熔断、模板过期暂停等)自动运行, 无需配置; 暂停时会发系统通知。
     </div>
   </div>
 

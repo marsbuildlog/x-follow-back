@@ -186,11 +186,28 @@ test('rateLimitBackoffMs: 有 reset 头时精确等到窗口重置+缓冲', () =
   assert.equal(ms, 120 * 1000 + 5000); // reset + 5秒缓冲
 });
 
-test('rateLimitBackoffMs: reset 已过不等待, 无头用兜底, 异常大值封顶20分钟', () => {
+test('rateLimitBackoffMs: reset 已过不等待, 无头用兜底; 到 reset 封顶20分钟后仍加缓冲', () => {
   const now = 1_000_000_000_000;
   assert.equal(rateLimitBackoffMs({ rateReset: Math.floor(now / 1000) - 10 }, now, 60_000), 0);
   assert.equal(rateLimitBackoffMs({}, now, 60_000), 60_000);
-  assert.equal(rateLimitBackoffMs({ rateReset: Math.floor(now / 1000) + 9999 }, now, 60_000), 20 * 60_000);
+  // 异常大 reset: 到 reset 封顶 20 分钟, 再加默认 5s 缓冲(人为冷却始终完整加上)
+  assert.equal(rateLimitBackoffMs({ rateReset: Math.floor(now / 1000) + 9999 }, now, 60_000), 20 * 60_000 + 5000);
+});
+
+test('rateLimitBackoffMs: 人为冷却 = max(5s, 冷却); 无头不加; 到 reset 封顶后仍加满冷却', () => {
+  const now = 1_000_000_000_000;
+  const reset = Math.floor(now / 1000) + 120;
+  // 冷却 1 分钟 > 5s → reset 剩余 + 1 分钟
+  assert.equal(rateLimitBackoffMs({ rateReset: reset }, now, 15 * 60_000, 5000, 60_000), 120 * 1000 + 60_000);
+  // 冷却 0 → 退回仅 5s 缓冲
+  assert.equal(rateLimitBackoffMs({ rateReset: reset }, now, 15 * 60_000, 5000, 0), 120 * 1000 + 5000);
+  // 无头: 只用 fallback, 忽略人为冷却
+  assert.equal(rateLimitBackoffMs({}, now, 15 * 60_000, 5000, 60_000), 15 * 60_000);
+  // 到 reset 18 分钟 + 冷却 5 分钟 = 23 分钟(不被 20 分钟总顶裁掉)
+  const reset18 = Math.floor(now / 1000) + 18 * 60;
+  assert.equal(rateLimitBackoffMs({ rateReset: reset18 }, now, 15 * 60_000, 5000, 5 * 60_000), 18 * 60_000 + 5 * 60_000);
+  // reset 已过 10s、冷却 1 分钟 → 还剩 50s 人为冷却
+  assert.equal(rateLimitBackoffMs({ rateReset: Math.floor(now / 1000) - 10 }, now, 60_000, 5000, 60_000), 50_000);
 });
 
 test('windowExhaustedWaitMs: remaining=0 时等到重置, 否则为 0', () => {

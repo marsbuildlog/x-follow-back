@@ -448,9 +448,10 @@ async function route1Graphql(op, vars) {
     const v = res.headers && res.headers.get('x-rate-limit-' + k);
     if (v != null && v !== '') rl[k] = Number(v);
   }
-  pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tpl.p, res.ok || res.status !== 404, Date.now());
-  // ↑ 422/429 等"被 X 完整处理过的失败"也会启动 tid 冷却计时(2026-10-11 实测: 422 后 30s 同 tid → 404 空体),
-  //   按"已消耗"记 ok 提前进入冷却换下一条; 404 空 body 才按 ADR-0002 记 fail(不延长冷却)。
+  // 任何拿到 HTTP 响应的发射都记 ok 进入冷却换下一条:
+  //   422/429 已被 X 处理过(实测后再用同 tid → 404);
+  //   404 空体本身就表示该 tid 此刻不可用——若不记 ok, pick 会因 at 已过期立刻重选同一条连打 404。
+  pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tpl.p, true, Date.now());
   await chrome.storage.local.set({ [TID_KEY]: pool });
   return { status: res.status, ok: res.ok, body, rl };
 }

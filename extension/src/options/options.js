@@ -611,12 +611,22 @@
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveSettings, 600);
   }
+  function clampHumanCooldownMin(raw) {
+    const n = Math.round(+raw);
+    if (!Number.isFinite(n)) return RF.DEFAULTS.humanCooldownMin;
+    return Math.max(0, Math.min(10, n));
+  }
   async function saveSettings() {
+    const { rf_settings: prev } = await chrome.storage.local.get('rf_settings');
+    const humanCooldownMin = clampHumanCooldownMin($('s-humanCooldownMin').value);
+    $('s-humanCooldownMin').value = humanCooldownMin;
     await chrome.storage.local.set({
       rf_settings: {
+        ...(prev || {}),
         intervalMin: +$('s-intervalMin').value || RF.DEFAULTS.intervalMin,
         intervalMax: +$('s-intervalMax').value || RF.DEFAULTS.intervalMax,
         autoFetchMin: +$('s-autoFetchMin').value || RF.DEFAULTS.autoFetchMin,
+        humanCooldownMin,
         tags: pendingTags,
       },
     });
@@ -630,12 +640,13 @@
     $('s-intervalMin').value = v.intervalMin;
     $('s-intervalMax').value = v.intervalMax;
     $('s-autoFetchMin').value = v.autoFetchMin;
+    $('s-humanCooldownMin').value = clampHumanCooldownMin(v.humanCooldownMin);
     pendingTags = (v.tags || []).map(normalizeTag).filter(Boolean);
     renderTagChips();
   }
   $('btn-add-tag').onclick = addTagFromInput;
   $('s-tag-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') addTagFromInput(); });
-  ['s-intervalMin', 's-intervalMax', 's-autoFetchMin'].forEach((id) => {
+  ['s-intervalMin', 's-intervalMax', 's-autoFetchMin', 's-humanCooldownMin'].forEach((id) => {
     $(id).addEventListener('change', scheduleSave);
   });
 

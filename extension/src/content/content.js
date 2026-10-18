@@ -681,12 +681,18 @@
         continue;
       }
       if (res.ok) lastSearchOkAt = Date.now();
-      if (!viaRoute1) await poolMark(poolTid, searchPath, res.ok); // Route 1 的 tid 由 background 自写回
+      // 404 也记消耗: 否则同 tid 会被立刻重选连打(与 background route1Graphql 同策略)
+      if (!viaRoute1) await poolMark(poolTid, searchPath, res.ok || res.status === 404);
       const parsed = parseSearchTimeline(res.body);
       // 非 JSON 响应(空体/错误页)带上状态码, 便于定位
       if (parsed.error) {
         parsed.error = `HTTP ${res.status}: ` + parsed.error;
         if (viaRoute1) {
+          // 404 空体多半是 tid 刚被别路用过/边缘冷却: 换 tid 再试几次, 别立刻判整帖失败
+          if (res.status === 404 && ++retries <= 3) {
+            await log(`Route 1 404(疑似 tid 冷却), 换 tid 重试(${retries}/3)`);
+            continue;
+          }
           if (res.status === 404) parsed.error += '(Route 1: tid 冷却未过或参数无效——请带日志反馈)';
           await log(`Route 1 发射失败: ${parsed.error}`);
           return parsed;
@@ -807,9 +813,10 @@
       let page = 0;
       let limited = false;
       const allItems = [];
+      let transportErr = null;
       while (page < AF.SCAN_MAX_PAGES) {
         const out = await searchPage(`conversation_id:${postId}`, cursor);
-        if (out.error) { await log(`扫描帖子 ${postId} 失败: ${out.error}`); return; }
+        if (out.error) { transportErr = out.error; await log(`扫描帖子 ${postId} 失败: ${out.error}`); break; }
         if (out.rateLimitedOut) { limited = true; break; }
         allItems.push(...out.items);
         if (!out.cursor || out.cursor === cursor || out.items.length === 0) break;
@@ -821,10 +828,20 @@
       const t1 = await getAfTask(handle);
       const post1 = ((t1.tags[tag] = t1.tags[tag] || { posts: [] }).posts || []).find((p) => p.postId === postId);
       if (post1) {
-        if (limited) post1.nextScanAt = Date.now() + AF.SCAN_RETRY_MS;
-        else markScanned(post1, Date.now(), AF.SCAN_INTERVAL_MS);
+        if (transportErr) {
+          // 传输失败不消耗 scanCount; 必须推后 nextScanAt, 否则回关循环每关注一人又撞同一帖
+          post1.nextScanAt = Date.now() + AF.SCAN_ERR_RETRY_MS;
+        } else if (limited) {
+          post1.nextScanAt = Date.now() + AF.SCAN_RETRY_MS;
+        } else {
+          markScanned(post1, Date.now(), AF.SCAN_INTERVAL_MS);
+        }
       }
       await saveAfTask(handle, t1);
+      if (transportErr) {
+        await log(`扫描帖子 ${postId} 推后${Math.round(AF.SCAN_ERR_RETRY_MS / 60000)}分钟重试(不消耗扫描次数)`);
+        return;
+      }
       if (limited) {
         await log(`扫描帖子 ${postId} 被限流, 隔${AF.SCAN_RETRY_MS / 60000}分钟重试(不消耗扫描次数)`);
         return;
@@ -1098,7 +1115,9 @@
           // 等窗口重置后重试同一人; 连续超过 3 次才标 failed 跳过
           if (rateRetryUserId !== item.userId) { rateRetryUserId = item.userId; rateRetryCount = 1; }
           else rateRetryCount++;
-          const backoff = rateLimitBackoffMs(r, Date.now(), settings.rateLimitBackoffMin * 60_000);
+          // 人为冷却仅挂关注循环的 429/88(有 reset 时公式内叠加; 无头不加)。拉取/搜索不传。
+          const coolMs = Math.max(0, Math.min(10, settings.humanCooldownMin ?? 1)) * 60_000;
+          const backoff = rateLimitBackoffMs(r, Date.now(), settings.rateLimitBackoffMin * 60_000, 5000, coolMs);
           if (rateRetryCount > 3) {
             current.status = 'failed';
             current.error = `连续限流 ${rateRetryCount} 次: ${r.errorText}`;

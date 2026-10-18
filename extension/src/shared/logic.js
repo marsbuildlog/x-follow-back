@@ -169,13 +169,16 @@
     return out;
   }
 
-  // 429 后应等待的毫秒数: 优先按响应头 x-rate-limit-reset 精确等到窗口重置(+缓冲),
-  // 无响应头时退回固定退避(fallbackMs)。上限 20 分钟防异常值; reset 已过则不等待。
-  function rateLimitBackoffMs(r, now, fallbackMs, bufMs = 5000) {
+  // 429 后应等待的毫秒数: 优先按响应头 x-rate-limit-reset 精确等到窗口重置,
+  // 再叠加 max(bufMs, humanCooldownMs)(人为冷却; 关注循环传入, 其它路径默认 0 → 仅 5s 缓冲)。
+  // 无响应头时退回固定退避(fallbackMs), 不加人为冷却。
+  // 到 reset 的等待封顶 20 分钟(防异常大头); 人为冷却始终完整加上(ADR-0008)。
+  function rateLimitBackoffMs(r, now, fallbackMs, bufMs = 5000, humanCooldownMs = 0) {
     if (r && Number.isFinite(r.rateReset)) {
-      const wait = r.rateReset * 1000 + bufMs - now;
-      if (wait <= 0) return 0;
-      return Math.min(wait, 20 * 60_000);
+      const pad = Math.max(bufMs, humanCooldownMs || 0);
+      const toResetMs = r.rateReset * 1000 - now;
+      if (toResetMs <= 0) return Math.max(0, toResetMs + pad);
+      return Math.min(toResetMs, 20 * 60_000) + pad;
     }
     return fallbackMs;
   }
