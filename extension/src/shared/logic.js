@@ -404,13 +404,20 @@
     return { added };
   }
 
-  // 到期帖二选一: 评论数大的优先(缺省视为 0); 同数按到期先后
+  // 到期帖二选一(产人优先新帖): 未首扫 > 重扫; 同档按帖子新旧(雪花 postId 越大越新);
+  // 同帖再按评论数大优先。互关帖生命周期短, 老热帖按到期 FIFO / 评论数霸占扫描会饿死新帖。
   function dueBetter(a, b) {
-    const ra = a.replyCount || 0, rb = b.replyCount || 0;
-    return ra > rb || (ra === rb && a.nextScanAt < b.nextScanAt);
+    const aFresh = (a.scanCount || 0) === 0;
+    const bFresh = (b.scanCount || 0) === 0;
+    if (aFresh !== bFresh) return aFresh;
+    if (a.postId !== b.postId) {
+      try { return BigInt(a.postId) > BigInt(b.postId); }
+      catch { return String(a.postId) > String(b.postId); }
+    }
+    return (a.replyCount || 0) > (b.replyCount || 0);
   }
 
-  // 下一个到期的帖子: scanCount < SCAN_MAX 且 nextScanAt <= now, 按 nextScanAt 最早优先; 没有返回 null
+  // 下一个到期的帖子: scanCount < SCAN_MAX 且 nextScanAt <= now; 优先级见 dueBetter; 没有返回 null
   function duePost(pool, now, scanMax) {
     let best = null;
     for (const p of pool) {
@@ -420,7 +427,7 @@
     return best;
   }
 
-  // 跨标签取到期帖(与 duePost 同优先级: 评论数大优先, 同数按到期先后; 循环内扫描用:
+  // 跨标签取到期帖(与 duePost 同优先级: 新帖优先; 循环内扫描用:
   // 不要求当前页面是某个标签页, Route 1 直连不挑场)
   function duePostAcrossTags(tags, now, scanMax) {
     let best = null;

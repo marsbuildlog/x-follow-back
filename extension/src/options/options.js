@@ -300,7 +300,18 @@
         poolRows.push({ tag, ...p });
       }
     }
-    poolRows.sort((a, b) => (b.replyCount || 0) - (a.replyCount || 0) || a.nextScanAt - b.nextScanAt);
+    // 与 dueBetter 同序: 未首扫 > 重扫; 同档雪花新→旧; 再按评论数
+    poolRows.sort((a, b) => {
+      const af = (a.scanCount || 0) === 0 ? 1 : 0, bf = (b.scanCount || 0) === 0 ? 1 : 0;
+      if (af !== bf) return bf - af;
+      try {
+        const d = BigInt(b.postId) - BigInt(a.postId);
+        if (d !== 0n) return d > 0n ? 1 : -1;
+      } catch {
+        if (a.postId !== b.postId) return a.postId < b.postId ? 1 : -1;
+      }
+      return (b.replyCount || 0) - (a.replyCount || 0);
+    });
     const searching = !!(afp && afp.running);
     const finishedFresh = afp && afp.running === false && afp.finishedAt && Date.now() - afp.finishedAt < 120_000;
     const searchChip = searching
