@@ -61,6 +61,7 @@
     <button data-view="dashboard" class="active">总览</button>
     <button data-view="followback">回关</button>
     <button data-view="activefollow">主动关注</button>
+    <button data-view="notback">未回关名单</button>
     <button data-view="settings">设置</button>
     <button data-view="log">日志</button>
     <button data-view="debug" id="nav-debug" hidden>调试</button>
@@ -142,6 +143,25 @@
       </table>
     </div>
     <div class="hint" id="af-queue-summary"></div>
+  </div>
+
+  <!-- 未回关名单: 我关注了但对方没关注我 -->
+  <div class="view" id="view-notback">
+    <h2>未回关名单 <span class="hint">我关注了、但对方没关注我的用户</span></h2>
+    <section><span id="diff-state" class="hint"></span></section>
+    <section class="row" style="margin:10px 0">
+      <button id="btn-diff-fetch" data-taskop="diff-fetch">拉取名单</button>
+      <button id="btn-diff-csv" class="ghost">导出 CSV</button>
+      <span id="diff-op-result" class="hint" data-opresult></span>
+    </section>
+    <div class="table-wrap">
+      <table id="diff-table">
+        <thead><tr><th style="width:140px">账号</th><th style="width:160px">昵称</th><th>Bio</th><th style="width:90px">粉丝数</th><th style="width:90px">关注数</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="hint" id="diff-summary"></div>
+    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取需任意 x.com 标签页在线, 页间有节奏控制, 大账号需要几分钟。表格最多展示 200 行, CSV 导出全量。</div>
   </div>
 
   <!-- 设置 -->

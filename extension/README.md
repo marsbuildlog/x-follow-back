@@ -47,7 +47,7 @@ x.com 标签页
 └── content.js     (隔离世界, 入口唯一文件)
       启动时 await import() 显式加载 shared/constants.js 与 shared/logic.js 并校验挂载
       (⚠ 不用 manifest 多文件列表保证顺序: Chrome 的多文件注入顺序不可靠, 出过 logic.js 未执行的确定性 bug)
-      拉取器(生产者): 翻页拉认证粉丝(100/页, 上限500页) → 纯追加合并进队列(不碰已有条目)
+      拉取器(生产者): 翻页拉认证粉丝(100/页, 上限8页) → 纯追加合并进队列(不碰已有条目)
         触发: 手动「更新列表」/ 打开页面且距上次拉取超过 autoFetchMin(默认30分钟)
         429 自行退避重试(同一页最多3次), 不影响回关循环
         已关注过滤: 只信列表自带 relationship_perspectives.following

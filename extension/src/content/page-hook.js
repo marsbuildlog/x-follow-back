@@ -20,9 +20,83 @@
   const MAX_HISTORY = 50;
   const MAX_RECENT = 80;
   const LS_KEY = '__xfollowback_api_templates'; // POST 类 REST 请求模板持久化(localStorage, x.com 域内)
+  const FOLLOW_PATH = '/i/api/1.1/friendships/create.json'; // 关注动作(页面自己的「关注/回关」按钮也走这里)
   let whoamiCache = null; // {at, name}——settings.json 结果, 10分钟正缓存
   let meName = null;      // {at, name}——从页面自己的 Viewer 响应被动喍探到的登录账号(零额外请求)
   let settingsFailAt = 0; // settings.json 失败负缓存: 5分钟内不再打该端点(实测会 429)
+
+  // ---- 手动关注失败捕获(稍后关注兑底, ADR-0007) ----
+  // 用户在页面上手动点「关注」但撞额度(161 单日上限/88/429)时, 记下目标 userId,
+  // 供 content script 取走收进主动关注队列, 额度恢复后自动补关注。
+  const failedFollows = []; // {userId, screenName, at}, 按 userId 去重, 最多 50 条
+  const followDiag = [];    // 关注失败观测(诊断): 每个失败响应一条, 随 take 返回供 content 落日志
+  // 页面保留路径(不是 handle): pathname 兑底 screen_name 时排除
+  const RESERVED_HANDLES_PAGE = new Set(['i', 'home', 'explore', 'notifications', 'messages', 'settings', 'search', 'hashtag']);
+
+  // 从请求里提取目标用户(兼容 form(user_id=..) / JSON / GraphQL variables 三种形态)
+  function extractFollowTarget(item) {
+    const raw = typeof item.body === 'string' ? item.body : '';
+    if (raw) {
+      const fmt = /^\s*[{[]/.test(raw) ? 'json' : 'form';
+      let userId = null, screenName = null;
+      try {
+        const p = new URLSearchParams(raw);
+        userId = p.get('user_id');
+        screenName = p.get('screen_name');
+      } catch {}
+      if (!userId && !screenName && fmt === 'json') {
+        try {
+          const o = JSON.parse(raw);
+          userId = o?.user_id ?? o?.userId ?? null;
+          screenName = o?.screen_name ?? o?.screenName ?? null;
+        } catch {}
+      }
+      return { fmt, userId, screenName, reqHead: raw.slice(0, 120) };
+    }
+    if (item.variables) {
+      const v = item.variables || {};
+      return { fmt: 'graphql', userId: v.user_id ?? v.userId ?? null, screenName: v.screen_name ?? v.screenName ?? null, reqHead: '' };
+    }
+    return { fmt: 'empty', userId: null, screenName: null, reqHead: '' };
+  }
+
+  // 从 follow 响应里识别额度类失败并登记目标; 无论是否捕获都留诊断(哪里断的一目了然)
+  function noteFollowResult(item, status, bodyText) {
+    try {
+      const isFollowApi = item.path === FOLLOW_PATH || (item.opName && /friendship/i.test(item.opName));
+      if (!isFollowApi) return;
+      const t = extractFollowTarget(item);
+      // screen_name 兑底: create.json 请求体只有 user_id, 从页面上下文反查——
+      // 个人主页场景 pathname 即 screenName(页面关注按钮 testid 前缀=userId, 双重确认防误认);
+      // 时间线/推荐场景从按钮所在帖卡的第一个单段链接取。失败 toast 不改 DOM, loadend 时按钮还在。
+      if (!t.screenName && t.userId) {
+        try {
+          const sel = `[data-testid="${t.userId}-follow"], [data-testid="${t.userId}-unfollow"]`;
+          if (document.querySelector(sel)) {
+            const pm = /^\/([A-Za-z0-9_]{1,15})$/.exec(location.pathname);
+            if (pm && !RESERVED_HANDLES_PAGE.has(pm[1].toLowerCase())) t.screenName = pm[1];
+            else {
+              const cell = document.querySelector(sel) && (document.querySelector(sel).closest('article') || document.querySelector(sel).closest('[data-testid="cellInnerDiv"]'));
+              const link = cell && cell.querySelector('a[href^="/"]');
+              const lm = link && /^\/([A-Za-z0-9_]{1,15})$/.exec(link.getAttribute('href') || '');
+              if (lm) t.screenName = lm[1];
+            }
+          }
+        } catch {}
+      }
+      const limit = !!globalThis.XFollowBackLogic.isFollowLimitFailure(status, bodyText);
+      const note = !t.userId && !t.screenName ? 'no-id' : !limit ? 'not-limit' : 'captured';
+      followDiag.push({
+        ts: Date.now(), status, fmt: t.fmt, note, userId: t.userId, screenName: t.screenName,
+        reqHead: t.reqHead, bodyHead: String(bodyText || '').slice(0, 160),
+      });
+      if (followDiag.length > 20) followDiag.shift();
+      if (note !== 'captured' || !t.userId) return; // 无 userId 无法入队(screen_name 兑底也不收——队列按 userId 去重)
+      if (failedFollows.some((f) => f.userId === t.userId)) return; // 同一人重复点不重复记
+      failedFollows.push({ userId: t.userId, screenName: t.screenName, at: Date.now() });
+      if (failedFollows.length > 50) failedFollows.shift();
+    } catch {}
+  }
 
   // Viewer 响应里就是页面自己认定的登录用户
   function sniffViewer(text) {
@@ -114,7 +188,10 @@
         });
         history.push({ operationName, queryId, method, ts });
         if (history.length > MAX_HISTORY) history.shift();
-        return pushRecent({ ts, method, path: u.pathname, opName: operationName, status: null });
+        const gqlRecent = pushRecent({ ts, method, path: u.pathname, opName: operationName, status: null });
+        // 关注类 mutation(FriendshipCreate 等)带上 variables: 失败捕获要从请求里提取目标用户
+        if (/friendship/i.test(operationName)) gqlRecent.variables = variables;
+        return gqlRecent;
       }
 
       // v1.1 REST 等 /i/api/ 请求: 按路径登记(保留最近一次), 回关等动作从这里重放
@@ -130,7 +207,10 @@
       };
       registry.set('p:' + u.pathname, apiEntry);
       if (method === 'POST') persistApiTemplate(u.pathname, apiEntry);
-      return pushRecent({ ts, method, path: u.pathname, status: null });
+      const recentItem = pushRecent({ ts, method, path: u.pathname, status: null });
+      // 关注路径额外带上 body(含 user_id): 失败捕获要从请求里提取目标用户
+      if (u.pathname === FOLLOW_PATH) recentItem.body = apiEntry.body;
+      return recentItem;
     } catch {}
     return null;
   }
@@ -157,6 +237,11 @@
         p.then((res) => {
           item.status = res && res.status;
           try {
+            // 手动关注失败捕获: REST(create.json)与 GraphQL(关注 mutation)都看; 读响应体判断额度类失败(clone 后读, 不消费原响应流)
+            const isFollowApi = item.path === FOLLOW_PATH || (item.opName && /friendship/i.test(item.opName));
+            if (res && !res.ok && isFollowApi) {
+              res.clone().text().then((t) => noteFollowResult(item, res.status, t)).catch(() => {});
+            }
             if (res && res.ok && item.opName === 'Viewer') {
               res.clone().text().then(sniffViewer).catch(() => {});
             }
@@ -193,6 +278,18 @@
     } catch {}
     if (item) this.addEventListener('loadend', () => {
       item.status = this.status;
+      try {
+        const isFollowApi = item.path === FOLLOW_PATH || (item.opName && /friendship/i.test(item.opName));
+        if (isFollowApi && item.status !== 200) {
+          // responseText 在 responseType=json 等模式下会抛——退化读 this.response 再序列化
+          let text = '';
+          try { text = this.responseText; } catch {}
+          if (!text && this.response && typeof this.response === 'object') {
+            try { text = JSON.stringify(this.response); } catch {}
+          }
+          noteFollowResult(item, item.status, text);
+        }
+      } catch {}
       try { if (item.opName === 'Viewer') sniffViewer(this.responseText); } catch {}
     });
     return origSend.apply(this, arguments);
@@ -218,6 +315,12 @@
     const reply = (data) =>
       window.postMessage({ source: 'xfollowback-page', type: 'result', id: msg.id, data }, '*');
 
+    if (msg.type === 'take-failed-follows') {
+      // 取走即清: content 侧每 5 秒轮询, 入队成功与否由 content 日志负责; diag 供未捕获失败的排查
+      reply({ follows: failedFollows.splice(0), diag: followDiag.splice(0) });
+      return;
+    }
+
     if (msg.type === 'list-captured') {
       // 对外暴露时剥掉 headers(含 bearer/csrf), 隔离世界不需要它们
       const gOps = [], apiEndpoints = [];
@@ -234,7 +337,7 @@
           });
         }
       }
-      reply({ hookVersion: 3, operations: gOps, apiEndpoints, history, recent });
+      reply({ hookVersion: 4, operations: gOps, apiEndpoints, history, recent });
       return;
     }
 

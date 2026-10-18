@@ -314,7 +314,7 @@
 
   // ---------- 通用工具 ----------
   // 纯逻辑(parseFollowers/interpret/mergeUsers/pickNextItem/...)在 shared/logic.js(顶部已显式 import), 有单元测试覆盖
-  const { parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName, rateLimitBackoffMs, windowExhaustedWaitMs,
+  const { parseFollowers, parseFollowList, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName, rateLimitBackoffMs, windowExhaustedWaitMs,
     parseSearchTimeline, afEligible, pickNextItem, mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
     nextAutoSearchTag, shouldAutoSearch } = L;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -376,7 +376,7 @@
 
       const settings = await getSettings();
       const count = 100;
-      const MAX_PAGES = 500; // 100/页 → 5万认证粉丝上限
+      const MAX_PAGES = 8; // 100/页 → 最多拉前 800 人; 更后面的粉丝回关收益低
       const all = [];
       let cursor = null;
       let page = 0;
@@ -391,7 +391,7 @@
             const cap = await callPage('list-captured', {});
             entry = (cap.operations || []).find((o) => o.operationName === OP_FOLLOWERS);
             if (!entry) {
-              const msg = `Route 1 不可用且未捕获到 ${OP_FOLLOWERS} 请求——请先打开 /${screenName}/verified_followers 页面并等它加载完`;
+              const msg = `Route 1 不可用(${res.error})且未捕获到 ${OP_FOLLOWERS} 请求——请先打开 /${screenName}/verified_followers 页面并等它加载完`;
               await log('⚠ ' + msg);
               return { ok: false, message: msg };
             }
@@ -481,6 +481,95 @@
   }
 
   // ============================================================
+  // 未回关名单(方案 A): 翻页拉自己的 Following 列表, 过滤 followedBy=false。
+  //   不拉粉丝列表求差集——Following 列表每个用户对象自带 followed_by, 一遍就够。
+  //   前提: rf_tpl:Following 模板已捕获(先打开一次自己的 /following 页面), Route 1 直连。
+  //   走 fire-and-forget(拉取可能几分钟), 进度落盘 fb_diff_progress, 结果落 fb_diff:{handle}。
+  // ============================================================
+  const OP_FOLLOWING = 'Following'; // 我关注的用户列表(GraphQL)
+  let fetchingDiff = false;
+  async function runDiffFetch() {
+    if (fetchingDiff) return;
+    fetchingDiff = true;
+    try {
+      const handle = await activeHandle();
+      if (!handle) { await log('未回关名单: 未识别到登录账号, 跳过'); return; }
+      const settings = await getSettings();
+      const count = 100;
+      const MAX_PAGES = 500; // 100/页 → 5万关注上限
+      const all = [];
+      let cursor = null;
+      let page = 0;
+      let retries = 0;
+      let incomplete = false;
+      while (page < MAX_PAGES) {
+        const res = await sendBg({
+          cmd: 'route1-graphql', op: OP_FOLLOWING,
+          vars: { count, cursor: cursor || null },
+        });
+        if (res && res.error) {
+          const msg = `未回关名单: Route 1 不可用(${res.error})——请先打开自己的 x.com/${handle}/following 页面并等它加载完(捕获模板), 再重新拉取`;
+          await log('⚠ ' + msg);
+          await store.set(K.diffProgress, { handle, running: false, error: msg, ts: Date.now() });
+          return;
+        }
+        if (res.status === 429) {
+          if (++retries > 3) {
+            incomplete = true;
+            await log('未回关名单: 拉取连续限流, 先保存已拉到的部分, 稍后重新拉取补全');
+            break;
+          }
+          const backoff = rateLimitBackoffMs(interpret(res), Date.now(), settings.rateLimitBackoffMin * 60_000);
+          await log(`未回关名单: 拉取限流, ${Math.round(backoff / 1000)}秒后重试第${page + 1}页`);
+          await sleep(backoff);
+          continue;
+        }
+        retries = 0;
+        const parsed = parseFollowList(res.body);
+        if (parsed.error) throw new Error(parsed.error);
+        if (page === 0 && parsed.firstRaw) {
+          await log('未回关名单: 用户对象结构样本: ' + parsed.firstRaw);
+        }
+        all.push(...parsed.users);
+        await store.set(K.diffProgress, {
+          handle, running: true, page: page + 1, maxPages: MAX_PAGES,
+          users: all.length, hasMore: !!parsed.cursor, ts: Date.now(),
+        });
+        await log(`未回关名单: 第${page + 1}页 +${parsed.users.length}, 累计${all.length}`);
+        // 实测: 列表拉完后接口仍会返回 cursor(非空但无数据), 所以 0 人即视为拉完
+        if (!parsed.cursor || parsed.cursor === cursor || parsed.users.length === 0) break;
+        cursor = parsed.cursor;
+        page++;
+        await sleep(800 + Math.random() * 700);
+      }
+      if (page >= MAX_PAGES) incomplete = true;
+
+      // 按 userId 去重, 过滤出未回关(followedBy=false)的人
+      const seen = new Set();
+      const users = all.filter((u) => (seen.has(u.userId) ? false : (seen.add(u.userId), true)));
+      const notBack = users
+        .filter((u) => !u.followedBy)
+        .map((u) => ({
+          userId: u.userId, screenName: u.screenName, name: u.name,
+          description: u.description || '',
+          followersCount: u.followersCount, friendsCount: u.friendsCount,
+        }));
+      await store.set(K.diff + ':' + handle, {
+        handle, ts: Date.now(), total: users.length, notBackCount: notBack.length,
+        incomplete: incomplete || undefined,
+        users: notBack,
+      });
+      await store.set(K.diffProgress, { handle, running: false, ts: Date.now() });
+      await log(`未回关名单更新${incomplete ? '(可能不全)' : ''}: 我关注${users.length}, 其中未回关${notBack.length}`);
+    } catch (e) {
+      await store.set(K.diffProgress, { running: false, error: String(e), ts: Date.now() });
+      await log(`未回关名单拉取失败: ${e}`);
+    } finally {
+      fetchingDiff = false;
+    }
+  }
+
+  // ============================================================
   // 主动关注(蓝V互关): 搜索阶段 + 扫描阶段(生产者)
   //   搜索: 控制台手动触发(任意 x.com 标签页宿主, 标签经消息指定)或池子断供自动触发;
   //         翻页拉互关帖 → 帖子 ID 入互关帖池, 帖子作者入队列
@@ -563,7 +652,8 @@
         if (res && res.error) await log(`Route 1 不可用(${res.error}), 本发回退页面内重放`);
         const cap = await callPage('list-captured', {});
         entry = (cap.operations || []).find((o) => o.operationName === OP_SEARCH);
-        if (!entry) return { error: `Route 1 不可用且页面未捕获到 ${OP_SEARCH}——请先打开互关标签页并等它加载完` };
+        // Route 1 失败原因随消息上抛(模板/bearer/ct0/tid池/网络一眼可辨), 不用翻日志
+        if (!entry) return { error: `Route 1 不可用(${(res && res.error) || 'background 无应答'})且页面未捕获到 ${OP_SEARCH}——请先打开互关标签页并等它加载完` };
         // 变量基准必须与 Route 1 同源(rf_tpl 首见形状): X 的翻页 cursor 绑定会话基准,
         // 页1(Route1/如 Latest)的 cursor 拿去页2(页面捕获/如 Top) → MalformedCursor(2026-10-11 实测)
         const { [K.gqlTpl + ':' + OP_SEARCH]: r1Tpl } = await chrome.storage.local.get(K.gqlTpl + ':' + OP_SEARCH);
@@ -1210,6 +1300,13 @@
           case 'refresh-list':
             sendResponse(await requestRefresh());
             break;
+          case 'diff-fetch': {
+            // 未回关名单拉取: fire-and-forget(可达数分钟), 立即应答; 进度走 fb_diff_progress + 日志
+            if (fetchingDiff) { sendResponse({ ok: false, message: '已在拉取中, 请等本轮完成' }); break; }
+            runDiffFetch().catch((e) => log(`未回关名单拉取异常: ${e}`));
+            sendResponse({ ok: true, message: '拉取已发车——进度见日志(页间有节奏控制, 非卡住)' });
+            break;
+          }
           case 'reset-task': await store.set(taskKey(h), null); sendResponse({ ok: true }); break;
           default: sendResponse({ ok: false, message: 'unknown cmd' });
         }
@@ -1455,13 +1552,56 @@
     }
   }
 
+  // 手动关注兑底(ADR-0007): 页面上手动点「关注」撞额度失败的人, 收进主动关注队列,
+  // 额度恢复后由循环自动补关注(显式人工意图 → 不做蓝V/求粉过滤, 队列去重+回关互斥照旧)。
+  // 由 ensureBar 每5秒调一次; take 即清, 身份未知/自己粉丝页场景不取, 失败记录留在 page-hook 下轮再取。
+  async function pollManualFollows() {
+    try {
+      const h = await activeHandle();
+      if (!h) return; // 身份未知: 不取走, 留给下一轮
+      // 自己的认证粉丝页上点「关注」= 回关意图(目标必是已关注自己的人),
+      // 回关拉取会自然把它们收进回关队列, 不重复入主动关注
+      const m = /^\/([^/]+)\/verified_followers/.exec(location.pathname);
+      if (m && m[1].toLowerCase() === String(h).toLowerCase()) return;
+      const r = await callPage('take-failed-follows', {});
+      const follows = ((r && r.follows) || []).filter((f) => f.userId);
+      // 诊断: 每条未被捕获的关注失败都落一行日志(含请求/响应片段), "为什么没接住"一目了然
+      for (const d of ((r && r.diag) || [])) {
+        if (d.note === 'captured') continue;
+        await log(`关注失败观测(未捕获): HTTP ${d.status}, body格式=${d.fmt}, 原因=${d.note}, ` +
+          `请求片段=${(d.reqHead || '').slice(0, 80) || '-'} 响应片段=${(d.bodyHead || '').slice(0, 100) || '-'}`);
+      }
+      if (!follows.length) return;
+      const { added } = await enqueueAfCandidates(
+        h,
+        follows.map((f) => ({ userId: f.userId, screenName: f.screenName || '', name: '', source: null })),
+        null
+      );
+      if (!added) {
+        await log(`手动关注撞额度兑底: ${follows.length}人已在队列(或已在回关队列), 不重复入队`);
+        return;
+      }
+      const names = follows.slice(0, 3).map((f) => '@' + (f.screenName || f.userId)).join(' ');
+      await log(`手动关注撞额度兑底: ${added}人收进主动关注队列(额度恢复→自动补关注): ${names}${follows.length > 3 ? ' 等' : ''}`);
+      sendBg({
+        cmd: 'notify', tag: 'rf-manual-follow',
+        title: 'XFollowBack: 已记入稍后关注',
+        message: `关注额度不足, ${added}人已入主动关注队列, 额度恢复后自动补关注`,
+      });
+    } catch {}
+  }
+
   let lastPath = '';
+  let ffTick = 0; // 手动关注兑底轮询计数(独立于 tplTick: 后者在无控件页面会提前 return 不递增)
   function ensureBar() {
     // SPA 路由切换不触发 storage 事件, 靠路径变化强制刷新缓存(否则控件拿旧任务渲染)
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
       refreshCache();
     }
+    // 手动关注兑底轮询(ADR-0007):
+    // ⚠ 必须在「非标签页/非认证粉丝页提前 return」之前调——手动关注发生在任意页面(逛主页/搜索/时间线)
+    if (++ffTick % 5 === 0) pollManualFollows();
     const tag = curTag();
     const onVerifiedFollowers = /^\/[^/]+\/verified_followers/.test(location.pathname);
     // 认证粉丝页 → 回关面板; 已配置的互关标签页 → 主动关注面板; 其余页面不展示

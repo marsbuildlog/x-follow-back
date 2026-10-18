@@ -12,6 +12,8 @@ const RF = {
     gqlTpl: 'rf_tpl',    // 前缀, 实际键 rf_tpl:<op> —— GraphQL 直连模板(Route 1 运输材料)
     bearer: 'rf_bearer', // 页面 authorization 头(Route 1 直连传输用, bearer 是常量)
     fetchProgress: 'rf_fetch_progress',
+    diff: 'fb_diff',       // 前缀, 实际键 fb_diff:{handle}(未回关名单: 我关注但对方没关注我)
+    diffProgress: 'fb_diff_progress', // 未回关名单拉取进度(面板展示用)
     afProgress: 'rf_af_progress', // 主动关注搜索进度(面板展示用)
     active: 'rf_active', // 最近活跃账号(options/popup 无页面上下文时定位任务)
     loopWait: 'rf_loop_wait', // 循环等待状态落盘(限流重试/窗口用完): 控制台总览可见"系统在等, 不是死了"

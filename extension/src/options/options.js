@@ -94,10 +94,10 @@
     const tab = await findXTab();
     renderHost(h, tab);
 
-    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, lw = null;
+    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, lw = null, diff = null, diffp = null;
     if (h) {
       const tk = `rf_task:${h}`, dk = `rf_daily:${h}`, ak = `rf_af_task:${h}`;
-      const r = await chrome.storage.local.get([tk, dk, ak, 'rf_fetch_progress', RF.KEY.afProgress, RF.KEY.loopWait]);
+      const r = await chrome.storage.local.get([tk, dk, ak, 'rf_fetch_progress', RF.KEY.afProgress, RF.KEY.loopWait, RF.KEY.diff + ':' + h, RF.KEY.diffProgress]);
       fb = r[tk];
       af = r[ak];
       daily = r[dk] && r[dk].date === todayStr() ? r[dk] : { followed: 0 };
@@ -105,6 +105,8 @@
       afp = r[RF.KEY.afProgress];
       lw = r[RF.KEY.loopWait] && r[RF.KEY.loopWait].until > Date.now() ? r[RF.KEY.loopWait] : null;
       loopWaitInfo = lw;
+      diff = r[RF.KEY.diff + ':' + h];
+      diffp = r[RF.KEY.diffProgress] || null;
     }
     renderFbCard(h, fb, daily, fp, tab);
     renderAfCard(h, af, tab, afp);
@@ -112,6 +114,7 @@
     renderGuideAf(h, af);
     renderFbDetail(h, fb, daily, fp, tab);
     renderAfDetail(h, af, afp);
+    renderDiffView(h, diff, diffp);
     renderLog();
     if (h) enrichFromPage(); // 模板捕获状态异步增补(仅页面可达时)
   }
@@ -425,6 +428,57 @@
     ? ` <span class="hint">· ${esc(loopWaitInfo.text)}, ${fmtWhen(loopWaitInfo.until)} 前自动继续</span>`
     : '';
 
+  // ---------- 未回关名单 Tab: 我关注了但对方没关注我 ----------
+  function renderDiffView(h, diff, diffp) {
+    const stateEl = $('diff-state');
+    const tbody = $('diff-table') && $('diff-table').querySelector('tbody');
+    if (!tbody) return;
+    const summaryEl = $('diff-summary');
+    if (!h) {
+      stateEl.textContent = '状态: 未识别账号——打开 x.com 登录后自动识别';
+      tbody.innerHTML = '';
+      summaryEl.textContent = '';
+      return;
+    }
+    if (diffp && diffp.running) {
+      stateEl.textContent = `状态: 拉取中(第${diffp.page}/${diffp.maxPages}页, 已读${diffp.users}人)`;
+    } else if (diffp && diffp.error) {
+      stateEl.textContent = '状态: 上次拉取失败 — ' + diffp.error;
+    } else if (diff) {
+      stateEl.textContent = `状态: 上次拉取 ${fmtDT(diff.ts)}` + (diff.incomplete ? '(可能不全, 重新拉取可补全)' : '');
+    } else {
+      stateEl.textContent = '状态: 未拉取——先打开一次自己的 /following 页面(捕获模板), 再点「拉取名单」';
+    }
+    const users = (diff && diff.users) || [];
+    tbody.innerHTML = users.slice(0, MAX_ROWS).map((u) =>
+      `<tr><td>@${esc(u.screenName)}</td><td>${esc(u.name)}</td><td>${esc(u.description)}</td><td>${u.followersCount ?? 0}</td><td>${u.friendsCount ?? 0}</td></tr>`
+    ).join('');
+    summaryEl.textContent = users.length
+      ? `我关注 ${diff.total} 人 · 未回关 ${diff.notBackCount} 人(表格最多展示 ${MAX_ROWS} 行, 全量请导出 CSV)`
+      : '';
+  }
+
+  // 未回关名单 CSV 导出(全量, 带 BOM 方便 Excel 直开中文)
+  $('btn-diff-csv').onclick = async () => {
+    const { rf_active: h } = await chrome.storage.local.get('rf_active');
+    if (!h) { showOp('diff-op-result', '未识别到账号——先打开 x.com'); return; }
+    const key = RF.KEY.diff + ':' + h;
+    const diff = (await chrome.storage.local.get(key))[key];
+    const users = (diff && diff.users) || [];
+    if (!users.length) { showOp('diff-op-result', '没有可导出的数据——先拉取名单'); return; }
+    const q = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+    const csv = ['handle,name,bio,followers,friends']
+      .concat(users.map((u) => [u.screenName, u.name, u.description, u.followersCount, u.friendsCount].map(q).join(',')))
+      .join('\r\n');
+    const url = URL.createObjectURL(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `not-following-back-${h}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showOp('diff-op-result', `已导出 ${users.length} 条`);
+  };
+
   // ---------- 操作按钮: 经消息转发给页面内的任务循环 ----------
   async function taskAction(cmd, picker, resultEl, noTabMsg, extra) {
     const tab = await picker();
@@ -464,7 +518,7 @@
   function initNav() {
     document.querySelectorAll('#nav button').forEach((b) => { b.onclick = () => switchView(b.dataset.view); });
     const hash = (location.hash || '').slice(1);
-    switchView(['dashboard', 'followback', 'activefollow', 'settings', 'log', 'debug'].includes(hash) ? hash : 'dashboard');
+    switchView(['dashboard', 'followback', 'activefollow', 'notback', 'settings', 'log', 'debug'].includes(hash) ? hash : 'dashboard');
   }
 
   // 队列子 tab / 帖池筛选

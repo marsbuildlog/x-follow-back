@@ -71,6 +71,50 @@
     return out;
   }
 
+  // Following/Followers 列表响应 → 用户列表(含 bio 与计数) + 翻页游标。
+  // 与 parseFollowers 同构, 但额外提取展示字段: description(bio)/followersCount/friendsCount,
+  // 并兼容 Following 接口的响应形态(data.user.result.timeline.timeline.instructions)。
+  // 身份/关注状态字段兼容策略与 parseFollowers 相同(legacy.* → core.user_legacy.* → core.*)。
+  function parseFollowList(body) {
+    const out = { users: [], cursor: null, error: null, firstRaw: null };
+    let data;
+    try { data = JSON.parse(body); } catch { out.error = '响应不是 JSON: ' + String(body).slice(0, 300); return out; }
+    if (data.errors) { out.error = JSON.stringify(data.errors).slice(0, 500); return out; }
+    const r0 = data?.data?.user?.result;
+    const instructions =
+      r0?.timeline?.timeline?.instructions ||
+      r0?.verified_followers_timeline?.timeline?.instructions || [];
+    if (!instructions.length) {
+      out.error = '响应结构无法解析(可能接口已变), 原始片段: ' + String(body).slice(0, 300);
+      return out;
+    }
+    for (const ins of instructions) {
+      for (const e of ins.entries || []) {
+        const id = e.entryId || '';
+        if (id.startsWith('user-')) {
+          const r = e.content?.itemContent?.user_results?.result;
+          if (!r) continue;
+          if (!out.firstRaw) out.firstRaw = JSON.stringify(r).slice(0, 4000);
+          const legacy = r.legacy || r.core?.user_legacy || {};
+          const rel = r.relationship_perspectives || {};
+          out.users.push({
+            userId: r.rest_id || r.core?.id_str,
+            screenName: legacy.screen_name || r.core?.screen_name || '',
+            name: legacy.name || r.core?.name || '',
+            description: legacy.description || legacy.formattedDescription || '',
+            followersCount: legacy.followers_count ?? 0,
+            friendsCount: legacy.friends_count ?? 0,
+            following: !!(rel.following ?? legacy.following ?? r.following ?? false),
+            followedBy: !!(rel.followed_by ?? legacy.followed_by),
+          });
+        } else if (id.startsWith('cursor-bottom')) {
+          out.cursor = e.content?.value ?? out.cursor;
+        }
+      }
+    }
+    return out;
+  }
+
   // 解释关注/查询接口返回, 归类错误(驱动限流退避/暂停决策)
   // res.rl: 响应头限流信息 {limit, remaining, reset}(reset 为 UTC epoch 秒), 由 page-hook 重放时提取
   function interpret(res) {
@@ -421,6 +465,22 @@
     return now - (af.lastAutoSearchAt || 0) >= cooldownMs;
   }
 
+  // 手动关注失败是否属于"额度不足"类: 429(接口限流)或 403 包 161(单日关注上限)/88(限流)。
+  // 只有这类失败值得收进稍后关注队列(额度恢复后补关注);
+  // 160 已关注/保护账号/封禁等失败没有补关注价值, 不收。
+  // status 传 HTTP 状态码, bodyText 传响应原文(可能不是 JSON)。
+  function isFollowLimitFailure(status, bodyText) {
+    if (status === 429) return true;
+    if (status !== 403) return false;
+    const text = bodyText || '';
+    let code = null;
+    try {
+      const errs = (JSON.parse(text) || {}).errors;
+      if (Array.isArray(errs) && errs.length) code = errs[0].code;
+    } catch {}
+    return code === 161 || code === 88 || /unable to follow more|follow limit|rate limit/i.test(text);
+  }
+
   // 扫描完成后: 计数+1, 隔 SCAN_INTERVAL_MS 重扫; 到达上限后不再到期(duePost 已滤)
   function markScanned(post, now, scanIntervalMs) {
     post.scanCount = (post.scanCount || 0) + 1;
@@ -430,11 +490,11 @@
   }
 
   globalThis.XFollowBackLogic = {
-    localDateStr, rolloverDaily, atName, parseFollowers, interpret,
+    localDateStr, rolloverDaily, atName, parseFollowers, parseFollowList, interpret,
     mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
     rateLimitBackoffMs, windowExhaustedWaitMs,
     parseSearchTimeline, passesRatio, afEligible, pickNextItem,
     mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
-    nextAutoSearchTag, shouldAutoSearch,
+    nextAutoSearchTag, shouldAutoSearch, isFollowLimitFailure,
   };
 })();

@@ -5,12 +5,12 @@ const assert = require('node:assert/strict');
 
 require('../src/shared/logic.js');
 const {
-  localDateStr, rolloverDaily, atName, parseFollowers, interpret,
+  localDateStr, rolloverDaily, atName, parseFollowers, parseFollowList, interpret,
   mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
   rateLimitBackoffMs, windowExhaustedWaitMs,
   parseSearchTimeline, passesRatio, afEligible, pickNextItem,
   mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
-  nextAutoSearchTag, shouldAutoSearch,
+  nextAutoSearchTag, shouldAutoSearch, isFollowLimitFailure,
 } = globalThis.XFollowBackLogic;
 
 // ---------- 测试工具 ----------
@@ -98,6 +98,60 @@ test('parseFollowers: 非 JSON 响应返回错误', () => {
 test('parseFollowers: 结构无法识别时报错并带原始片段', () => {
   const out = parseFollowers('{"data":{}}');
   assert.match(out.error, /结构无法识别|无法解析/);
+});
+
+// ---------- parseFollowList(未回关名单) ----------
+function listUserResult(overrides = {}) {
+  return {
+    __typename: 'User',
+    rest_id: overrides.rest_id || '2001',
+    core: { name: overrides.name || 'User B', screen_name: overrides.screen_name || 'userb' },
+    legacy: Object.assign({
+      description: 'bio here', followers_count: 1234, friends_count: 567,
+      following: false, followed_by: false,
+    }, overrides.legacy || {}),
+    relationship_perspectives: Object.assign({ followed_by: false, following: false }, overrides.rel || {}),
+  };
+}
+
+test('parseFollowList: 提取 bio/粉丝数/关注数与关注关系', () => {
+  const out = parseFollowList(wrap([
+    userEntry(listUserResult(), 'user-0'),
+    userEntry(listUserResult({ rest_id: '2002', screen_name: 'userc', rel: { followed_by: true } }), 'user-1'),
+  ]));
+  assert.equal(out.error, null);
+  assert.equal(out.users.length, 2);
+  const a = out.users[0];
+  assert.equal(a.userId, '2001');
+  assert.equal(a.screenName, 'userb');
+  assert.equal(a.name, 'User B');
+  assert.equal(a.description, 'bio here');
+  assert.equal(a.followersCount, 1234);
+  assert.equal(a.friendsCount, 567);
+  assert.equal(a.followedBy, false); // 我关注了他但他没关注我 → 入未回关名单
+  assert.equal(out.users[1].followedBy, true);
+});
+
+test('parseFollowList: 解析 cursor-bottom 游标', () => {
+  const entries = [userEntry(listUserResult()), { entryId: 'cursor-bottom-0', content: { value: 'CUR' } }];
+  const out = parseFollowList(wrap(entries));
+  assert.equal(out.error, null);
+  assert.equal(out.cursor, 'CUR');
+});
+
+test('parseFollowList: 缺 legacy 时计数回退为 0 不炸', () => {
+  const r = listUserResult();
+  delete r.legacy;
+  const out = parseFollowList(wrap([userEntry(r)]));
+  assert.equal(out.error, null);
+  assert.equal(out.users[0].description, '');
+  assert.equal(out.users[0].followersCount, 0);
+  assert.equal(out.users[0].friendsCount, 0);
+});
+
+test('parseFollowList: errors 响应返回 error', () => {
+  const out = parseFollowList(JSON.stringify({ errors: [{ code: 88, message: 'Rate limit exceeded' }] }));
+  assert.match(out.error, /Rate limit/);
 });
 
 // ---------- interpret ----------
@@ -617,4 +671,24 @@ test('nextAutoSearchTag: 环形轮换 + 去#/空白(与 settings 存储形式一
   assert.equal(nextAutoSearchTag(tags, 'followback'), '互推');      // 大小写不敏感匹配 + 去空白
   assert.equal(nextAutoSearchTag(tags, '不存在的'), '蓝V互关');     // 失效回第一个
   assert.equal(nextAutoSearchTag([], null), null);                 // 未配置不抓
+});
+
+// ---------- 手动关注失败捕获(ADR-0007) ----------
+test('isFollowLimitFailure: 403 包 161(单日上限) → 是额度类失败', () => {
+  const body = JSON.stringify({ errors: [{ code: 161, message: 'You are unable to follow more people at this time.' }] });
+  assert.equal(isFollowLimitFailure(403, body), true);
+});
+
+test('isFollowLimitFailure: 403 包 160(已关注)/保护账号等 → 不是额度类, 不收', () => {
+  const already = JSON.stringify({ errors: [{ code: 160, message: 'You already follow this user.' }] });
+  assert.equal(isFollowLimitFailure(403, already), false);
+  const protectedAcc = JSON.stringify({ errors: [{ code: 108, message: 'You cannot follow a protected account.' }] });
+  assert.equal(isFollowLimitFailure(403, protectedAcc), false);
+});
+
+test('isFollowLimitFailure: 429 直接算; 文本兕底(非 JSON 错误页带限流字样)也算', () => {
+  assert.equal(isFollowLimitFailure(429, ''), true);
+  assert.equal(isFollowLimitFailure(403, 'unable to follow more people'), true);
+  assert.equal(isFollowLimitFailure(404, JSON.stringify({ errors: [{ code: 161 }] })), false); // 非 403/429 不收
+  assert.equal(isFollowLimitFailure(200, ''), false);
 });
