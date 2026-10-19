@@ -365,6 +365,15 @@ chrome.webRequest.onSendHeaders.addListener(
       const tidH = hs.find((h) => h.name.toLowerCase() === 'x-client-transaction-id');
       if (!tidH || !tidH.value || tidH.value.length < 60) return;
       const path = new URL(details.url).pathname;
+      // bearer 仍见啥收啥(常量, 与 tid 白名单无关)
+      const auth = hs.find((h) => h.name.toLowerCase() === 'authorization');
+      if (auth && auth.value && auth.value.startsWith('Bearer ')) {
+        chrome.storage.local.get(RF.KEY.bearer).then(({ [RF.KEY.bearer]: old }) => {
+          if (old !== auth.value) chrome.storage.local.set({ [RF.KEY.bearer]: auth.value });
+        }).catch(() => {});
+      }
+      // tid 只收 Route 1 会用的路径(挡 timeline / avatar_content / viewer_context 等噪声)
+      if (!globalThis.RFTidPool.shouldHarvest(path)) return;
       // 写入串行化: 写进行中时丢弃本次(同页面批量请求会重复触发, 页面持续产 tid, 丢一两条无妨)
       if (tidWriteInFlight) return;
       tidWriteInFlight = true;
@@ -372,18 +381,19 @@ chrome.webRequest.onSendHeaders.addListener(
         .then(({ [TID_KEY]: pool }) =>
           chrome.storage.local.set({ [TID_KEY]: globalThis.RFTidPool.add(pool || [], tidH.value, path, Date.now()) }))
         .catch(() => {}).finally(() => { tidWriteInFlight = false; });
-      // bearer 是常量, 变化极罕见: 见到就覆盖(供 Route 1 直连传输用)
-      const auth = hs.find((h) => h.name.toLowerCase() === 'authorization');
-      if (auth && auth.value && auth.value.startsWith('Bearer ')) {
-        chrome.storage.local.get(RF.KEY.bearer).then(({ [RF.KEY.bearer]: old }) => {
-          if (old !== auth.value) chrome.storage.local.set({ [RF.KEY.bearer]: auth.value });
-        }).catch(() => {});
-      }
     } catch {}
   },
   { urls: ['https://x.com/i/api/*'] },
   ['requestHeaders']
 );
+
+// 热升级后清一次池内噪声(timeline 等旧条目), 避免占满白名单名额
+chrome.storage.local.get(TID_KEY).then(({ [TID_KEY]: pool }) => {
+  const cleaned = globalThis.RFTidPool.prune(pool || []);
+  if (cleaned.length !== (pool || []).length) {
+    chrome.storage.local.set({ [TID_KEY]: cleaned }).catch(() => {});
+  }
+}).catch(() => {});
 
 // graphql 模板旁听(Route 1 运输材料): op → {path, queryId, method, features, 首见变量, GET稳定参数, 页面原头筛后}。
 // 教训(65a4bcc): onBeforeRequest 的 extraInfoSpec 不收 requestHeaders(只 onSendHeaders 给),

@@ -139,7 +139,7 @@
     const tbody = $('tid-pool-table') && $('tid-pool-table').querySelector('tbody');
     if (!sumEl || !tbody) return;
     const key = (RF.KEY && RF.KEY.tidPool) || 'rf_tid_pool';
-    const cap = (globalThis.RFTidPool && RFTidPool.CAP) || 256;
+    const cap = (globalThis.RFTidPool && RFTidPool.CAP) || 512;
     let pool = [];
     try {
       const r = await chrome.storage.local.get(key);

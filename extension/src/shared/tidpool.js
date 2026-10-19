@@ -3,12 +3,31 @@
 // 规则(ADR-0002/0004): 同 tid 成功后约 60 秒冷却, 冷却期内任何请求 404; 失败不延长冷却;
 //   tid 不绑定 URL, 同路径跨查询可复用; 跨路径未证实(生成时哈希了 method+path), 池子默认只取同路径。
 (function () {
-  const CAP = 256; // 池容量: 多路径分摊(Search/TweetDetail/拉粉/回关), 64 过易挤掉冷路径; 过期条目仍无价值
+  const CAP = 512; // 池容量: 多路径分摊(Search/TweetDetail/拉粉/回关); 白名单后噪声已挡, 仍留余量给冷却轮换
 
-  // 收割入库: 形状 sanity(实测 94 字符); 同 tid+路径只刷新时间戳; 最新在前, 超容截断
+  // 只收 Route 1 会按路径取用的 op / 回关 REST。首页 timeline、avatar_content、viewer_context
+  // 等噪声刷屏会挤掉真库存(跨路径未证实, GraphQL 用不上它们)。
+  const HARVEST_GQL_OPS = new Set([
+    'SearchTimeline', 'TweetDetail', 'BlueVerifiedFollowers', 'Following', 'UserByScreenName',
+  ]);
+  function shouldHarvest(path) {
+    if (!path) return false;
+    if (path.startsWith('/i/api/graphql/')) {
+      const op = path.split('/').pop();
+      return HARVEST_GQL_OPS.has(op);
+    }
+    return path === '/i/api/1.1/friendships/create.json';
+  }
+  function prune(pool) {
+    return (pool || []).filter((e) => shouldHarvest(e.p)).slice(0, CAP);
+  }
+
+  // 收割入库: 形状 sanity(实测 94 字符); 同 tid+路径只刷新时间戳; 最新在前, 超容截断;
+  // 顺手丢掉非白名单旧条目(升级后清噪声)。
   function add(pool, tid, path, now) {
-    if (!tid || tid.length < 60) return pool || [];
-    const rest = (pool || []).filter((e) => !(e.t === tid && e.p === path));
+    const base = prune(pool);
+    if (!tid || tid.length < 60 || !shouldHarvest(path)) return base;
+    const rest = base.filter((e) => !(e.t === tid && e.p === path));
     rest.unshift({ t: tid, p: path || '', at: now });
     return rest.slice(0, CAP);
   }
@@ -33,5 +52,5 @@
     );
   }
 
-  globalThis.RFTidPool = { add, pick, markResult, CAP };
+  globalThis.RFTidPool = { add, pick, markResult, prune, shouldHarvest, CAP, HARVEST_GQL_OPS };
 })();
