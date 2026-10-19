@@ -132,7 +132,7 @@
     el.innerHTML = items.map((it) => {
       const mark = it.ok ? '✅' : (it.optional ? '○' : '❗');
       const btn = (!it.ok && (it.action === 'open-url' || it.action === 'open-x') && it.url)
-        ? `<button type="button" class="ghost" data-ready-open="${esc(it.url)}" style="margin:0 0 0 8px;padding:1px 10px;font-size:12px">打开</button>`
+        ? `<button type="button" class="ghost" data-ready-open="${esc(it.url)}" style="margin:0 0 0 8px;padding:1px 10px;font-size:12px">${esc(it.btnLabel || '打开')}</button>`
         : (!it.ok && it.action === 'harvest')
           ? `<button type="button" class="ghost" data-ready-harvest="1" style="margin:0 0 0 8px;padding:1px 10px;font-size:12px">手动供血</button>`
           : '';
@@ -311,27 +311,18 @@
     `;
   }
 
-  // ---------- 总览: 分业务引导(相互独立) ----------
+  // ---------- 总览: 分业务引导(身份/回关模板已并入「运行所需材料」, 此处只留产品开跑步骤) ----------
   function renderGuideFb(h, fb, tab) {
     const el = $('guide-fb');
     const running = fb && (fb.state === 'running' || fb.state === 'done');
-    if (h && tplCaptured === true && running) {
-      el.innerHTML = `<div class="hint">✅ 回关引导已完成(模板已捕获, ${fb.state === 'running' ? '任务运行中' : '等待新粉, 拉到自动续跑'})</div>`;
+    if (running) {
+      el.innerHTML = `<div class="hint">✅ 回关已启动(${fb.state === 'running' ? '运行中' : '等待新粉, 拉到自动续跑'})</div>`;
       return;
     }
-    const s1 = h ? `${stepMark(true)} <b>账号识别</b> — @${esc(h)}` : `${stepMark(false)} <b>账号识别</b> — 打开 x.com 登录后自动识别`;
-    const openVf = `<button data-goto-open-vf="1" style="margin:0;padding:1px 10px;font-size:12px">打开认证粉丝页</button>`;
-    const s2 = !h
-      ? `${stepMark(false)} <b>回关模板</b> — 待账号识别`
-      : tplCaptured === true
-        ? `${stepMark(true)} <b>回关模板</b> — 已捕获`
-        : `${stepMark(false)} <b>回关模板</b> — ${openVf} 在列表里点一次任意用户的「回关」(仅需一次)`;
-    const s3 = running
-      ? `${stepMark(true)} <b>启动</b> — 运行中`
-      : `${stepMark(false)} <b>启动</b> — ${tplCaptured === true ? `点「开始回关」` : '完成②后点「开始回关」'}`;
-    el.innerHTML = `<h3>回关引导</h3><div class="guide-line">${s1}</div><div class="guide-line">${s2}</div><div class="guide-line">${s3}</div>`;
-    const b = el.querySelector('[data-goto-open-vf]');
-    if (b) b.onclick = () => chrome.tabs.create({ url: `https://x.com/${h}/verified_followers` });
+    const startHint = h
+      ? '点上方「开始回关」(材料见就绪清单; create.json 仅兑底用)'
+      : '先在就绪清单完成账号识别, 再点「开始回关」';
+    el.innerHTML = `<h3>回关引导</h3><div class="guide-line">${stepMark(false)} <b>启动</b> — ${startHint}</div>`;
   }
 
   function renderGuideAf(h, af) {
@@ -791,6 +782,11 @@
     $('s-autoFetchMin').value = v.autoFetchMin;
     $('s-humanCooldownMin').value = clampHumanCooldownMin(v.humanCooldownMin);
     pendingTags = (v.tags || []).map(normalizeTag).filter(Boolean);
+    // 空列表回落默认 #蓝V互关, 并落盘一次(老用户曾存空数组的情况)
+    if (!pendingTags.length) {
+      pendingTags = (RF.DEFAULTS.tags || ['蓝V互关']).map(normalizeTag).filter(Boolean);
+      scheduleSave();
+    }
     renderTagChips();
   }
   $('btn-add-tag').onclick = addTagFromInput;

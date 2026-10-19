@@ -34,3 +34,12 @@ test('isConsoleHostAlive: 15s 窗口', () => {
   assert.equal(isConsoleHostAlive({ rf_console_host: { at: now - 16_000 } }, now), false);
   assert.equal(isConsoleHostAlive({}, now), false);
 });
+
+test('evaluate: 搜索模板默认指向 #蓝V互关', () => {
+  const r = evaluate({}, 'me');
+  const search = r.items.find((i) => i.id === 'tpl:SearchTimeline');
+  assert.equal(search.ok, false);
+  assert.equal(search.action, 'open-url');
+  assert.equal(search.btnLabel, '#蓝V互关');
+  assert.match(search.url, /hashtag\/%E8%93%9DV%E4%BA%92%E5%85%B3|hashtag\/蓝V互关/);
+});

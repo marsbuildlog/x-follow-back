@@ -3,7 +3,7 @@
 (function () {
   const GQL_OPS = [
     { id: 'TweetDetail', label: '帖子详情模板', hint: '打开任意帖子详情页一次', url: 'https://x.com/home' },
-    { id: 'SearchTimeline', label: '搜索模板', hint: '打开互关标签页或点「手动供血」', url: null },
+    { id: 'SearchTimeline', label: '搜索模板', hint: '打开 #蓝V互关 旁听一次即可', url: 'https://x.com/hashtag/' + encodeURIComponent('蓝V互关') },
     { id: 'BlueVerifiedFollowers', label: '认证粉丝模板', hint: '打开自己的认证粉丝页', url: null },
     { id: 'Following', label: '关注列表模板', hint: '打开自己的 /following', url: null },
     { id: 'UserByScreenName', label: '用户查询模板', hint: '打开任意用户主页一次', url: null },
@@ -29,20 +29,27 @@
       const tpl = snap[(K.gqlTpl || 'rf_tpl') + ':' + op.id];
       const ok = !!(tpl && tpl.p && tpl.q && tpl.v0);
       let url = op.url;
+      let hint = op.hint;
       if (op.id === 'BlueVerifiedFollowers' && handle) url = `https://x.com/${handle}/verified_followers`;
       if (op.id === 'Following' && handle) url = `https://x.com/${handle}/following`;
-      if (op.id === 'SearchTimeline' && (snap[K.settings || 'rf_settings'] || {}).tags?.length) {
-        const tag = snap[K.settings || 'rf_settings'].tags[0];
+      let btnLabel = null;
+      if (op.id === 'SearchTimeline') {
+        // 优先用配置里第一个标签, 否则默认 #蓝V互关(与 DEFAULTS.tags 一致)
+        const cfgTags = (snap[K.settings || 'rf_settings'] || {}).tags;
+        const tags = (cfgTags && cfgTags.length) ? cfgTags : ((RF.DEFAULTS && RF.DEFAULTS.tags) || ['蓝V互关']);
+        const tag = String(tags[0] || '蓝V互关').replace(/^#/, '').trim() || '蓝V互关';
         url = `https://x.com/hashtag/${encodeURIComponent(tag)}`;
+        hint = `打开 #${tag} 旁听一次即可`;
+        btnLabel = '#' + tag;
       }
       items.push({
         id: 'tpl:' + op.id,
         ok,
         label: op.label,
-        hint: ok ? '已旁听' : op.hint,
-        action: ok ? null : 'open-url',
+        hint: ok ? '已旁听' : hint,
+        action: ok ? null : (url ? 'open-url' : null),
         url,
-        harvest: op.id === 'SearchTimeline',
+        btnLabel,
       });
     }
 
