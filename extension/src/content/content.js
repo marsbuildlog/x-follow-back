@@ -573,11 +573,13 @@
   // 主动关注(蓝V互关): 搜索阶段 + 扫描阶段(生产者)
   //   搜索: 控制台手动触发(任意 x.com 标签页宿主, 标签经消息指定)或池子断供自动触发;
   //         翻页拉互关帖 → 帖子 ID 入互关帖池, 帖子作者入队列
-  //   扫描: 到期帖子的回复翻页 → 新评论者/作者入队列; 首扫拉完, 隔两天重扫, 最多三次
+  //   扫描: 到期帖子的回复翻页 → 新评论者/作者入队列; 首扫拉完, 隔两天重扫, 最多三次;
+  //         触发=循环水位顺路 / 互关标签页 tick / 控制台手动连扫(补到 MANUAL_SCAN_TARGET)
   //   两者共用 SearchTimeline 模板, 走 Route 1 直连不挑页面(结构性缺料才回退页面重放), 扫描用 conversation_id: 语法
   // ============================================================
   let afSearching = false;
   let afScanning = false;
+  let afBurstScanning = false; // 控制台手动连扫(补到 MANUAL_SCAN_TARGET)
 
   // 从 SearchTimeline 响应里筛出合格候选人(去转推, 过滤蓝V/保护/已关注/比值)
   function eligibleFromItems(items, tag) {
@@ -797,16 +799,17 @@
     }
   }
 
-  // 扫描阶段(自动): 扫一个到期帖子的回复, 新评论者入队。每 tick 至多一帖。
-  // 分页期间只攒本地数据; 限流中断不消耗扫描次数, 隔半小时重试
+  // 扫描阶段(自动/手动连扫): 扫一个到期帖子的回复, 新评论者入队。每 tick 至多一帖。
+  // 分页期间只攒本地数据; 限流中断不消耗扫描次数, 隔半小时重试。
+  // 返回 { skipped|transportErr|limited|added } 供连扫统计; 无到期帖/互斥时 skipped。
   async function runAfScanOne(tag, handle) {
-    if (afScanning || afSearching) return;
+    if (afScanning || afSearching) return { skipped: true };
     afScanning = true;
     try {
       // 选帖(只读快照): 挑最早到期的到期帖
       const t0 = await getAfTask(handle);
       const post = duePost((t0.tags[tag] && t0.tags[tag].posts) || [], Date.now(), AF.SCAN_MAX);
-      if (!post) return;
+      if (!post) return { skipped: true };
       const postId = post.postId;
       const scanNo = post.scanCount + 1;
       let cursor = null;
@@ -840,20 +843,109 @@
       await saveAfTask(handle, t1);
       if (transportErr) {
         await log(`扫描帖子 ${postId} 推后${Math.round(AF.SCAN_ERR_RETRY_MS / 60000)}分钟重试(不消耗扫描次数)`);
-        return;
+        return { transportErr };
       }
       if (limited) {
         await log(`扫描帖子 ${postId} 被限流, 隔${AF.SCAN_RETRY_MS / 60000}分钟重试(不消耗扫描次数)`);
-        return;
+        return { limited: true };
       }
       const { users } = eligibleFromItems(allItems, tag);
       const { added } = await enqueueAfCandidates(handle, users, tag);
       await log(`扫描帖子 ${postId}(第${scanNo}/${AF.SCAN_MAX}次, ${page + 1}页): 候选+${added}`);
+      return { added };
     } catch (e) {
       await log(`扫描异常: ${e}`);
+      return { transportErr: String(e) };
     } finally {
       afScanning = false;
     }
+  }
+
+  // 控制台手动连扫: 跨标签扫到期帖, 直到待关注 ≥ MANUAL_SCAN_TARGET 或无到期帖。
+  // 校验通过后立即返回「已发车」, 循环转后台(节奏走 searchPage 的 SEARCH_MIN_GAP_MS);
+  // 进度 rf_af_scan_progress, 双击由 afBurstScanning 拦下。
+  async function runAfScanBurst(handle) {
+    if (!handle) return { ok: false, message: '未识别到登录账号——请确认已登录 x.com' };
+    if (afBurstScanning) return { ok: false, message: '已在连扫中, 等本轮跑完' };
+    if (afSearching) return { ok: false, message: '正在抓取互关帖, 等本轮跑完再扫' };
+    if (afScanning) return { ok: false, message: '正在扫描中, 稍后再试' };
+
+    const t0 = await getAfTask(handle);
+    const pend0 = t0.queue.filter((q) => q.status === 'pending').length;
+    if (pend0 >= AF.MANUAL_SCAN_TARGET) {
+      return { ok: false, message: `待关注已有 ${pend0}, 已达目标 ${AF.MANUAL_SCAN_TARGET}` };
+    }
+    if (!duePostAcrossTags(t0.tags, Date.now(), AF.SCAN_MAX)) {
+      return { ok: false, message: '无到期帖——可先点「抓取互关帖」补池' };
+    }
+
+    afBurstScanning = true;
+    (async () => {
+      let scanned = 0;
+      let totalAdded = 0;
+      let errStreak = 0;
+      let stopReason = '';
+      let pending = pend0;
+      try {
+        await log(`手动连扫发车: 待关注 ${pend0} → 目标 ${AF.MANUAL_SCAN_TARGET}`);
+        await store.set(K.afScanProgress, {
+          running: true, scanned: 0, added: 0, pending: pend0, target: AF.MANUAL_SCAN_TARGET,
+        });
+
+        while (true) {
+          if (halted) { stopReason = '宿主离线'; break; }
+          const t = await getAfTask(handle);
+          if (t.state === 'paused') { stopReason = '任务已暂停'; break; }
+          pending = t.queue.filter((q) => q.status === 'pending').length;
+          if (pending >= AF.MANUAL_SCAN_TARGET) {
+            stopReason = `待关注已达 ${pending}`;
+            break;
+          }
+          const due = duePostAcrossTags(t.tags, Date.now(), AF.SCAN_MAX);
+          if (!due) {
+            stopReason = '无到期帖——可先点「抓取互关帖」补池';
+            break;
+          }
+          if (afSearching) { stopReason = '抓取互关帖介入, 连扫让路'; break; }
+          // 循环水位扫描可能正占着 afScanning, 等它让开再扫
+          while (afScanning && !halted) await sleep(400);
+          if (halted) { stopReason = '宿主离线'; break; }
+          if (afSearching) { stopReason = '抓取互关帖介入, 连扫让路'; break; }
+
+          const one = await runAfScanOne(due.tag, handle);
+          if (one && one.skipped) { await sleep(400); continue; } // 互斥竞态, 稍后再试
+          scanned++;
+          if (one && one.transportErr) {
+            errStreak++;
+            if (errStreak >= 3) { stopReason = `连续传输失败 ${errStreak} 次, 停止连扫`; break; }
+          } else {
+            errStreak = 0;
+            if (one && typeof one.added === 'number') totalAdded += one.added;
+          }
+          const t2 = await getAfTask(handle);
+          pending = t2.queue.filter((q) => q.status === 'pending').length;
+          await store.set(K.afScanProgress, {
+            running: true, scanned, added: totalAdded, pending, target: AF.MANUAL_SCAN_TARGET,
+          });
+        }
+
+        await log(`手动连扫结束: 扫了 ${scanned} 帖, 候选+${totalAdded}, 待关注 ${pending}/${AF.MANUAL_SCAN_TARGET}(${stopReason})`);
+      } catch (e) {
+        stopReason = String(e);
+        await log(`手动连扫异常: ${e}`);
+      } finally {
+        afBurstScanning = false;
+        await store.set(K.afScanProgress, {
+          running: false, finishedAt: Date.now(), scanned, added: totalAdded,
+          pending, target: AF.MANUAL_SCAN_TARGET, stopReason,
+        });
+      }
+    })();
+
+    return {
+      ok: true,
+      message: `连扫已发车(目标待关注 ${AF.MANUAL_SCAN_TARGET})——进度见控制台状态行与日志`,
+    };
   }
 
   // 主动关注启动(标签页面板按钮): 与回关同一个循环, 逐条优先自动生效
@@ -1193,7 +1285,7 @@
     }
     const tag = curTag();
     if (!active && !tag) return;
-    if (fetchingFollowers || afSearching || afScanning) return;
+    if (fetchingFollowers || afSearching || afScanning || afBurstScanning) return;
     const settings = await getSettings();
 
     // 池子断供自动补池: 待关注低于水位 + 无到期帖(当日已扫完/池见底) + 冷却已过 → 自动抓一轮新帖。
@@ -1293,6 +1385,7 @@
             // 立即应答, 搜索转后台执行——全程可达数分钟(桶节奏 30s/发、池子供血、tid 冷却 70s),
             // 若同步等它, 按钮会几分钟无反应。进度走 rf_af_progress + 日志, 双击由 afSearching 拦下。
             if (afSearching) { sendResponse({ ok: false, message: '已在搜索中, 等本轮跑完' }); break; }
+            if (afBurstScanning) { sendResponse({ ok: false, message: '正在连扫帖子, 等本轮跑完再抓取' }); break; }
             const tags = ((await getSettings()).tags) || [];
             const norm = (t) => String(t || '').replace(/^#/, '').trim().toLowerCase();
             const want = norm(msg.tag);
@@ -1304,6 +1397,13 @@
             }
             runAfSearch(tagStr, h).catch((e) => log(`抓取异常: ${e}`));
             sendResponse({ ok: true, message: '搜索已发车——进度见控制台状态行与日志(页间有节奏控制, 非卡住)' });
+            break;
+          }
+          case 'af-scan': {
+            // 手动连扫: 任意 x.com 宿主, 跨标签扫到期帖补待关注到 MANUAL_SCAN_TARGET。
+            // 立即应答(校验在 runAfScanBurst 内), 循环转后台; 进度 rf_af_scan_progress。
+            if (!h) { sendResponse({ ok: false, message: '未识别到登录账号——先打开 x.com 完成识别' }); break; }
+            sendResponse(await runAfScanBurst(h));
             break;
           }
           case 'pause-task':
@@ -1416,7 +1516,7 @@
   // 主动关注状态文案(done = 队列已清空, 与回关的"等待新粉"区分)
   function afCurrentState(t) {
     if (!t) return STATE_STYLE.idle;
-    if (t.state === 'running') return (cachedAfProgress || afSearching || afScanning) ? { text: '后台任务中', color: '#7c3aed' } : STATE_STYLE.running;
+    if (t.state === 'running') return (cachedAfProgress || afSearching || afScanning || afBurstScanning) ? { text: '后台任务中', color: '#7c3aed' } : STATE_STYLE.running;
     if (t.state === 'paused') return STATE_STYLE['paused:' + t.pauseReason] || { text: '已暂停', color: '#d97706' };
     if (t.state === 'done') return { text: '队列已空', color: '#16a34a' };
     return STATE_STYLE.idle;
@@ -1496,7 +1596,7 @@
     const waitMin = (at) => (at ? Math.max(0, Math.ceil((at - Date.now()) / 60000)) : 0);
     const sig = ['af', t.state, t.pauseReason, total, pending, pool.length, dueCount, st.text,
       waitMin(t.nextAutoResumeAt), loopWait ? loopWait.text + waitMin(loopWait.until) : '',
-      panelOpen, panelMsg, cachedTemplateCaptured, afScanning, afSearching,
+      panelOpen, panelMsg, cachedTemplateCaptured, afScanning, afSearching, afBurstScanning,
       cachedAfProgress ? cachedAfProgress.page : 0, t.lastError, t.screenName, tag].join('|');
     if (sig === widget.dataset.sig) return;
     widget.dataset.sig = sig;
@@ -1516,7 +1616,7 @@
     const loopWaitHint = loopWait
       ? ` · ${loopWait.text}, 约${Math.max(1, Math.ceil((loopWait.until - Date.now()) / 60000))}分钟后继续` : '';
     const searchInfo = cachedAfProgress ? ` · 搜索第${cachedAfProgress.page}/${cachedAfProgress.maxPages}页`
-      : (afScanning ? ' · 扫描回复中' : '');
+      : (afBurstScanning ? ' · 手动连扫中' : (afScanning ? ' · 扫描回复中' : ''));
     const actionBtn = t.state === 'running'
       ? `<button class="rf-btn primary" data-act="pause">暂停</button>`
       : t.state === 'paused'

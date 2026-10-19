@@ -2,8 +2,8 @@
 // 数据编排: 每次渲染读 rf_active → 并行读 回关任务/主动关注任务/每日计数/两个进度 →
 //   分发到 总览卡(状态+操作组件)、各任务 Tab(状态行+操作+明细表)、引导卡。
 // 任务仍宿主在 x.com 页面内; 控制按钮经消息转发(start-task/pause-task/resume-task/
-//   refresh-list/start-af-task/af-search), 抓取互关帖宿主任意 x.com 标签页
-//   (Route 1 直连不挑场, 标签经消息指定、按配置校验)。
+//   refresh-list/start-af-task/af-search/af-scan), 抓取/连扫帚主任意 x.com 标签页
+//   (Route 1 直连不挑场; 抓取标签经消息指定、按配置校验)。
 // 页面只在两处被问到: ①tpl-captured(回关模板捕获状态, 异步增补) ②reset/start 等动作本身。
 (() => {
   'use strict';
@@ -94,26 +94,27 @@
     const tab = await findXTab();
     renderHost(h, tab);
 
-    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, lw = null, diff = null, diffp = null;
+    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, afsp = null, lw = null, diff = null, diffp = null;
     if (h) {
       const tk = `rf_task:${h}`, dk = `rf_daily:${h}`, ak = `rf_af_task:${h}`;
-      const r = await chrome.storage.local.get([tk, dk, ak, 'rf_fetch_progress', RF.KEY.afProgress, RF.KEY.loopWait, RF.KEY.diff + ':' + h, RF.KEY.diffProgress]);
+      const r = await chrome.storage.local.get([tk, dk, ak, 'rf_fetch_progress', RF.KEY.afProgress, RF.KEY.afScanProgress, RF.KEY.loopWait, RF.KEY.diff + ':' + h, RF.KEY.diffProgress]);
       fb = r[tk];
       af = r[ak];
       daily = r[dk] && r[dk].date === todayStr() ? r[dk] : { followed: 0 };
       fp = r.rf_fetch_progress;
       afp = r[RF.KEY.afProgress];
+      afsp = r[RF.KEY.afScanProgress];
       lw = r[RF.KEY.loopWait] && r[RF.KEY.loopWait].until > Date.now() ? r[RF.KEY.loopWait] : null;
       loopWaitInfo = lw;
       diff = r[RF.KEY.diff + ':' + h];
       diffp = r[RF.KEY.diffProgress] || null;
     }
     renderFbCard(h, fb, daily, fp, tab);
-    renderAfCard(h, af, tab, afp);
+    renderAfCard(h, af, tab, afp, afsp);
     renderGuideFb(h, fb, tab);
     renderGuideAf(h, af);
     renderFbDetail(h, fb, daily, fp, tab);
-    renderAfDetail(h, af, afp);
+    renderAfDetail(h, af, afp, afsp);
     renderDiffView(h, diff, diffp);
     renderLog();
     if (h) enrichFromPage(); // 模板捕获状态异步增补(仅页面可达时)
@@ -147,7 +148,11 @@
     btns.push(`<button class="ghost" data-taskop="${kind}-pause" ${off(state !== 'running')}>暂停</button>`);
     btns.push(`<button class="ghost" data-taskop="${kind}-resume" ${off(state !== 'paused')}>恢复</button>`);
     if (kind === 'af') {
-      btns.push(`<button class="ghost" data-taskop="af-search" ${off(!extra)} title="${extra ? '翻页搜索帖子入池(任意 x.com 标签页在线即可, Route 1 直连)' : '需任意 x.com 标签页在线(打开 x.com 即可)'}">抓取互关帖</button>`);
+      const canHost = !!(extra && extra.host);
+      const canSearch = canHost && !extra.searching && !extra.scanning;
+      const canScan = canHost && !extra.searching && !extra.scanning;
+      btns.push(`<button class="ghost" data-taskop="af-search" ${off(canSearch)} title="${canHost ? '翻页搜索帖子入池(任意 x.com 标签页在线即可, Route 1 直连)' : '需任意 x.com 标签页在线(打开 x.com 即可)'}">抓取互关帖</button>`);
+      btns.push(`<button class="ghost" data-taskop="af-scan" ${off(canScan)} title="${canHost ? `跨标签连扫到期帖, 补待关注到 ${RF.AF.MANUAL_SCAN_TARGET}` : '需任意 x.com 标签页在线(打开 x.com 即可)'}">扫描帖子</button>`);
     }
     return `<div class="ops">${btns.join('')}</div>`;
   }
@@ -167,7 +172,18 @@
     `;
   }
 
-  function renderAfCard(h, af, tab, afp) {
+  function afScanChip(afsp) {
+    if (!afsp) return '';
+    if (afsp.running) {
+      return ` <span style="color:#7c3aed;font-weight:700">· 扫描中: 已扫 ${afsp.scanned ?? 0} 帖 · 待关注 ${afsp.pending ?? 0}/${afsp.target ?? RF.AF.MANUAL_SCAN_TARGET}</span>`;
+    }
+    if (afsp.finishedAt && Date.now() - afsp.finishedAt < 120_000) {
+      return ` <span style="color:#1b5e20">· 上轮连扫完成: 扫了 ${afsp.scanned ?? 0} 帖, 候选+${afsp.added ?? 0}, 待关注 ${afsp.pending ?? '—'}</span>`;
+    }
+    return '';
+  }
+
+  function renderAfCard(h, af, tab, afp, afsp) {
     const el = $('dash-af');
     const st = stateOf(af);
     const q = (af && af.queue) || [];
@@ -177,14 +193,14 @@
       for (const p of obj.posts || []) { poolTotal++; if (p.scanCount < RF.AF.SCAN_MAX && p.nextScanAt <= Date.now()) poolDue++; }
     }
     const searching = !!(afp && afp.running);
-    const grabOK = !!tab && !searching;
-    const water = (af && af.state === 'running' && c.pending < RF.AF.PENDING_TARGET)
+    const scanning = !!(afsp && afsp.running);
+    const water = (af && af.state === 'running' && c.pending < RF.AF.PENDING_TARGET && !scanning)
       ? ` <span class="hint">(低于水位 ${RF.AF.PENDING_TARGET}, 循环顺路扫帖补员中)</span>` : '';
     el.innerHTML = `
       <h3><span class="dot" style="background:${st.color}"></span>主动关注任务 ${h ? `<span class="hint">@${esc(h)}</span>` : ''}<button class="more" data-goto="activefollow">详情 →</button></h3>
-      <div>状态: <b>${esc(st.text)}</b>${searching ? ` <span style="color:#7c3aed;font-weight:700">· 抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>` : ''}${loopWaitChip()}</div>
+      <div>状态: <b>${esc(st.text)}</b>${searching ? ` <span style="color:#7c3aed;font-weight:700">· 抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>` : ''}${afScanChip(afsp)}${loopWaitChip()}</div>
       <div>待关注 <span class="num">${c.pending}</span> / 队列 ${q.length} · 帖子池 ${poolTotal}${poolDue ? `(待扫 ${poolDue})` : ''}${water}</div>
-      ${h ? taskCardOps('af', af, grabOK) : '<div class="hint">打开 x.com 登录后自动识别账号</div>'}
+      ${h ? taskCardOps('af', af, { host: !!tab, searching, scanning }) : '<div class="hint">打开 x.com 登录后自动识别账号</div>'}
     `;
   }
 
@@ -287,7 +303,7 @@
   }
   const postLink = (id) => `<a href="https://x.com/i/web/status/${esc(id)}" target="_blank">${esc(id)}</a>`;
 
-  function renderAfDetail(h, af, afp) {
+  function renderAfDetail(h, af, afp, afsp) {
     const st = stateOf(af);
     const q = (af && af.queue) || [];
     const c = countsOf(q);
@@ -315,12 +331,14 @@
       return 0;
     });
     const searching = !!(afp && afp.running);
+    const scanning = !!(afsp && afsp.running);
     const finishedFresh = afp && afp.running === false && afp.finishedAt && Date.now() - afp.finishedAt < 120_000;
     const searchChip = searching
       ? ` · <span style="color:#7c3aed;font-weight:700">抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>`
       : finishedFresh
         ? ` · <span style="color:#1b5e20">上轮抓取完成: 帖子${afp.posts ?? '—'}</span>`
         : '';
+    const scanChip = afScanChip(afsp);
 
     if (!h) {
       $('af-state').textContent = '状态: 未识别账号——打开 x.com 登录后自动识别';
@@ -328,7 +346,7 @@
       $('af-state').textContent = `账号: @${h} · 状态: 未启动(先完成引导: 配置标签 → 抓取互关帖)`;
     } else {
       $('af-state').innerHTML =
-        `账号: @${esc(h)} · 状态: <b>${esc(st.text)}</b>${searchChip}` +
+        `账号: @${esc(h)} · 状态: <b>${esc(st.text)}</b>${searchChip}${scanChip}` +
         ` · 队列: ${q.length}(待关注 ${c.pending}) · 帖子池: ${poolTotal}(待扫 ${poolDue})` +
         loopWaitChip() +
         (af.lastError ? `<br>最近错误: <span style="color:#b02a37">${esc(af.lastError)}</span>` : '');
@@ -363,12 +381,14 @@
       $('af-queue-table').querySelector('tbody').innerHTML = '';
       $('af-queue-summary').textContent = '';
     }
-    // 按钮状态(抓取中时禁用抓取, content 侧 afSearching 也有双击拦截); 标签选择随配置刷新
+    // 按钮状态(抓取/连扫互斥, content 侧闸门也有双击拦截); 标签选择随配置刷新
     const state = (af && af.state) || null;
     $('btn-af-start').disabled = state === 'running';
     $('btn-af-pause').disabled = state !== 'running';
     $('btn-af-resume').disabled = state !== 'paused';
-    $('btn-af-search').disabled = searching;
+    $('btn-af-search').disabled = searching || scanning;
+    const scanBtn = $('btn-af-scan');
+    if (scanBtn) scanBtn.disabled = searching || scanning;
     // 抓取标签下拉: 配置列表里的一个(默认第一个); 手动抓取按它搜
     if (!pendingTags.includes(afSearchTag)) afSearchTag = pendingTags[0] || null;
     const sel = $('af-search-tag');

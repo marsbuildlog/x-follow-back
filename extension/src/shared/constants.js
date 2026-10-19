@@ -15,6 +15,7 @@ const RF = {
     diff: 'fb_diff',       // 前缀, 实际键 fb_diff:{handle}(未回关名单: 我关注但对方没关注我)
     diffProgress: 'fb_diff_progress', // 未回关名单拉取进度(面板展示用)
     afProgress: 'rf_af_progress', // 主动关注搜索进度(面板展示用)
+    afScanProgress: 'rf_af_scan_progress', // 主动关注手动连扫进度(面板展示用)
     active: 'rf_active', // 最近活跃账号(options/popup 无页面上下文时定位任务)
     loopWait: 'rf_loop_wait', // 循环等待状态落盘(限流重试/窗口用完): 控制台总览可见"系统在等, 不是死了"
   },
@@ -39,6 +40,7 @@ const RF = {
     SEARCH_PAGE_SIZE: 20,    // 搜索每页条数——必须是 20: SearchTimeline 实测 count≠20 直接 404(2026-10-10 对照实验: 21/40/100 均 404)
     PENDING_TARGET: 20,      // 主动关注队列水位线(决策链: 2026-10-11 用户拍板 50; 2026-10-12 再拍 50→20):
                              // 待关注低于此值时扫描提权+触发断供补池(需求侧缺人信号)
+    MANUAL_SCAN_TARGET: 300, // 控制台「扫描帖子」连扫目标: 待关注补到此数或池内无到期帖即停(与 PENDING_TARGET 独立)
     QUEUE_CAP: 10000,        // 主动关注队列容量上限(满了暂停入队)
     RATIO_MAX: 1.2,          // 求粉特征阈值: 粉丝数/关注数 < 1.2 才入队
     SCAN_MAX: 3,             // 每帖最多扫描次数(帖子生命周期短, 三次后不再有新回复者)
