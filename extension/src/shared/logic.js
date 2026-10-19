@@ -257,9 +257,44 @@
   // 主动关注(蓝V互关): 纯逻辑函数
   // ============================================================
 
+  // 从 Tweet/TweetWithVisibilityResults 抽出与 SearchTimeline 同形的 item; 删帖/缺用户返回 null。
+  // Search 与 TweetDetail 共用(两代 schema: legacy 计数 vs relationship_counts)。
+  function tweetResultToItem(tr0) {
+    if (!tr0 || tr0.__typename === 'TweetTombstone') return null;
+    const tr = tr0.__typename === 'TweetWithVisibilityResults' ? (tr0.tweet || tr0) : tr0;
+    if (!tr || tr.__typename === 'TweetTombstone') return null;
+    const legacy = tr.legacy || {};
+    const u = tr.core?.user_results?.result || tr.tweet?.core?.user_results?.result;
+    if (!u) return null;
+    const uLegacy = u.legacy || u.core?.user_legacy || {};
+    const core = u.core || {};
+    const counts = u.relationship_counts || {};
+    const persp = u.relationship_perspectives || {};
+    const num = (v) => (Number.isFinite(v) ? v : null);
+    const replyCount = num(
+      legacy.reply_count ?? tr.comment_count ?? tr.core?.comment_count ??
+      tr.tweet?.legacy?.reply_count ?? tr.tweet?.comment_count
+    );
+    return {
+      postId: String(tr.rest_id || legacy.id_str || ''),
+      replyCount,
+      isRetweet: !!(legacy.retweeted_status_result),
+      user: {
+        userId: u.rest_id || u.core?.id_str,
+        screenName: core.screen_name || uLegacy.screen_name || '',
+        name: core.name || uLegacy.name || '',
+        blue: !!u.is_blue_verified,
+        isProtected: !!(u.privacy?.protected ?? uLegacy.protected ?? u.protected),
+        following: !!(persp.following ?? uLegacy.following),
+        followedBy: !!(persp.followed_by ?? uLegacy.followed_by),
+        followers: num(uLegacy.followers_count ?? counts.followers),
+        friends: num(uLegacy.friends_count ?? counts.following),
+      },
+    };
+  }
+
   // SearchTimeline 响应 → 帖子条目 + 翻页游标。
-  // 每条 item: {postId, isRetweet, user:{userId,screenName,name,blue,isProtected,following,followedBy,followers,friends}}
-  // 同一个解析器服务两个阶段: 搜索阶段(原生查询词)与扫描阶段(conversation_id:<帖子ID>), 结构相同。
+  // 每条 item: {postId, isRetweet, user:{…}}；搜索阶段与 conversation_id 兑底扫描共用。
   function parseSearchTimeline(body) {
     const out = { items: [], cursor: null, error: null };
     let data;
@@ -272,39 +307,8 @@
       return out;
     }
     const pushTweet = (tr) => {
-      if (!tr || tr.__typename === 'TweetTombstone') return; // 已删除的帖子
-      const legacy = tr.legacy || {};
-      const u = tr.core?.user_results?.result || tr.tweet?.core?.user_results?.result;
-      if (!u) return;
-      // 两代 schema: 旧版字段在 u.legacy(followers_count/protected...);
-      //   新版(实测 2026-10 SearchTimeline)无 legacy——身份在 u.core, 计数在 u.relationship_counts,
-      //   保护状态在 u.privacy.protected
-      const uLegacy = u.legacy || u.core?.user_legacy || {};
-      const core = u.core || {};
-      const counts = u.relationship_counts || {};
-      const persp = u.relationship_perspectives || {};
-      const num = (v) => (Number.isFinite(v) ? v : null);
-      // 评论数(回复数)多代 schema: 旧版 legacy.reply_count; 新版顶层 comment_count
-      const replyCount = num(
-        legacy.reply_count ?? tr.comment_count ?? tr.core?.comment_count ??
-        tr.tweet?.legacy?.reply_count ?? tr.tweet?.comment_count
-      );
-      out.items.push({
-        postId: String(tr.rest_id || legacy.id_str || ''),
-        replyCount,
-        isRetweet: !!(legacy.retweeted_status_result),
-        user: {
-          userId: u.rest_id || u.core?.id_str,
-          screenName: core.screen_name || uLegacy.screen_name || '',
-          name: core.name || uLegacy.name || '',
-          blue: !!u.is_blue_verified,
-          isProtected: !!(u.privacy?.protected ?? uLegacy.protected ?? u.protected),
-          following: !!(persp.following ?? uLegacy.following),
-          followedBy: !!(persp.followed_by ?? uLegacy.followed_by),
-          followers: num(uLegacy.followers_count ?? counts.followers),
-          friends: num(uLegacy.friends_count ?? counts.following),
-        },
-      });
+      const item = tweetResultToItem(tr);
+      if (item) out.items.push(item);
     };
     for (const ins of instructions) {
       for (const e of ins.entries || []) {
@@ -323,6 +327,52 @@
       if (ins.type === 'TimelineReplaceEntry' && ins.entry) {
         const rid = ins.entry.entryId || '';
         if (rid.startsWith('cursor-bottom')) out.cursor = ins.entry.content?.value ?? out.cursor;
+      }
+    }
+    return out;
+  }
+
+  // TweetDetail 响应 → 楼内回复条目 + 底游标(与页面评论列表同源; ADR-0009)。
+  // 根: data.threaded_conversation_with_injections_v2(或 v1); 回复多在 conversationthread-* 模块。
+  function parseTweetDetail(body) {
+    const out = { items: [], cursor: null, error: null };
+    let data;
+    try { data = JSON.parse(body); } catch { out.error = '响应不是 JSON: ' + String(body).slice(0, 300); return out; }
+    if (data.errors) { out.error = JSON.stringify(data.errors).slice(0, 500); return out; }
+    const conv = data?.data?.threaded_conversation_with_injections_v2
+      || data?.data?.threaded_conversation_with_injections;
+    const instructions = (conv && conv.instructions) || [];
+    if (!instructions.length) {
+      out.error = 'TweetDetail 响应结构无法解析(可能接口已变), 原始片段: ' + String(body).slice(0, 300);
+      return out;
+    }
+    const pushTweet = (tr) => {
+      const item = tweetResultToItem(tr);
+      if (item) out.items.push(item);
+    };
+    const takeCursor = (content, entryId) => {
+      if (!content) return;
+      const id = entryId || '';
+      if (id.startsWith('cursor-bottom') || content.cursorType === 'Bottom') {
+        if (content.value) out.cursor = content.value;
+      }
+    };
+    for (const ins of instructions) {
+      for (const e of ins.entries || []) {
+        const id = e.entryId || '';
+        const c = e.content || {};
+        if (id.startsWith('tweet-') || c.entryType === 'TimelineTimelineItem') {
+          pushTweet(c.itemContent?.tweet_results?.result);
+        } else if (id.startsWith('conversationthread-') || c.entryType === 'TimelineTimelineModule') {
+          for (const it of c.items || []) {
+            pushTweet(it.item?.itemContent?.tweet_results?.result);
+          }
+        } else if (id.startsWith('cursor-') || c.entryType === 'TimelineTimelineCursor') {
+          takeCursor(c, id);
+        }
+      }
+      if (ins.type === 'TimelineReplaceEntry' && ins.entry) {
+        takeCursor(ins.entry.content, ins.entry.entryId);
       }
     }
     return out;
@@ -505,7 +555,7 @@
     localDateStr, rolloverDaily, atName, parseFollowers, parseFollowList, interpret,
     mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
     rateLimitBackoffMs, windowExhaustedWaitMs,
-    parseSearchTimeline, passesRatio, afEligible, pickNextItem,
+    parseSearchTimeline, parseTweetDetail, tweetResultToItem, passesRatio, afEligible, pickNextItem,
     mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
     nextAutoSearchTag, shouldAutoSearch, isFollowLimitFailure,
   };

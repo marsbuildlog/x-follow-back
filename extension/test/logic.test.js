@@ -8,7 +8,7 @@ const {
   localDateStr, rolloverDaily, atName, parseFollowers, parseFollowList, interpret,
   mergeUsers, findPendingItem, evaluateStall, buildApiRequest,
   rateLimitBackoffMs, windowExhaustedWaitMs,
-  parseSearchTimeline, passesRatio, afEligible, pickNextItem,
+  parseSearchTimeline, parseTweetDetail, passesRatio, afEligible, pickNextItem,
   mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
   nextAutoSearchTag, shouldAutoSearch, isFollowLimitFailure,
 } = globalThis.XFollowBackLogic;
@@ -622,6 +622,49 @@ test('parseSearchTimeline: 新版 schema——计数取 relationship_counts, 保
   const ub = out.items[1].user;
   assert.equal(ub.blue, false);
   assert.equal(afEligible(ub, 1.2).reason, 'not-blue');
+});
+
+// ---------- TweetDetail(帖子详情楼, ADR-0009) ----------
+test('parseTweetDetail: conversationthread 模块 + Bottom cursor + TweetWithVisibilityResults', () => {
+  const focal = newTweetEntry(newSchemaUser({ userId: '1', screenName: 'op' }), 'tweet-111');
+  const replyUser = newSchemaUser({ userId: '2', screenName: 'replier', followers: 10, following: 20 });
+  const body = JSON.stringify({ data: { threaded_conversation_with_injections_v2: { instructions: [
+    { type: 'TimelineAddEntries', entries: [
+      focal,
+      {
+        entryId: 'conversationthread-222',
+        content: {
+          entryType: 'TimelineTimelineModule',
+          items: [{
+            entryId: 'conversationthread-222-tweet-333',
+            item: { itemContent: { tweet_results: { result: {
+              __typename: 'TweetWithVisibilityResults',
+              tweet: {
+                __typename: 'Tweet', rest_id: '333', legacy: { id_str: '333' },
+                core: { user_results: { result: replyUser } },
+              },
+            } } } },
+          }],
+        },
+      },
+      {
+        entryId: 'cursor-bottom-0',
+        content: { entryType: 'TimelineTimelineCursor', cursorType: 'Bottom', value: 'TD_CUR' },
+      },
+    ] },
+  ] } } });
+  const out = parseTweetDetail(body);
+  assert.equal(out.error, null);
+  assert.equal(out.cursor, 'TD_CUR');
+  assert.ok(out.items.length >= 2);
+  assert.equal(out.items.some((i) => i.user.screenName === 'replier'), true);
+  assert.equal(out.items.find((i) => i.user.screenName === 'replier').user.followers, 10);
+});
+
+test('parseTweetDetail: 空结构报错', () => {
+  const out = parseTweetDetail(JSON.stringify({ data: {} }));
+  assert.ok(out.error);
+  assert.equal(out.items.length, 0);
 });
 
 // ---------- 池子断供自动补池(ADR-0006) ----------

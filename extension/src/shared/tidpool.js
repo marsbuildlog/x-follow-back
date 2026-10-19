@@ -3,7 +3,7 @@
 // 规则(ADR-0002/0004): 同 tid 成功后约 60 秒冷却, 冷却期内任何请求 404; 失败不延长冷却;
 //   tid 不绑定 URL, 同路径跨查询可复用; 跨路径未证实(生成时哈希了 method+path), 池子默认只取同路径。
 (function () {
-  const CAP = 64; // 池容量: 只留最近的(tid 存活实测 ≥1h, 上限未知, 过期条目无价值)
+  const CAP = 256; // 池容量: 多路径分摊(Search/TweetDetail/拉粉/回关), 64 过易挤掉冷路径; 过期条目仍无价值
 
   // 收割入库: 形状 sanity(实测 94 字符); 同 tid+路径只刷新时间戳; 最新在前, 超容截断
   function add(pool, tid, path, now) {

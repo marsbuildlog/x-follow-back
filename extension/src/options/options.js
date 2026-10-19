@@ -117,7 +117,73 @@
     renderAfDetail(h, af, afp, afsp);
     renderDiffView(h, diff, diffp);
     renderLog();
+    if (isDev) renderTidPool();
     if (h) enrichFromPage(); // 模板捕获状态异步增补(仅页面可达时)
+  }
+
+  // ---------- 调试: rf_tid_pool 按类型汇总 + 明细(仅 isDev) ----------
+  const TID_CD_MS = 70_000;
+  function tidShortLabel(p) {
+    if (!p) return '(空路径)';
+    const last = String(p).split('?')[0].split('/').filter(Boolean).pop();
+    return last || p;
+  }
+  function tidAgeText(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm' + (s % 60 ? (s % 60) + 's' : '');
+    return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm';
+  }
+  async function renderTidPool() {
+    const sumEl = $('tid-pool-summary');
+    const tbody = $('tid-pool-table') && $('tid-pool-table').querySelector('tbody');
+    if (!sumEl || !tbody) return;
+    const key = (RF.KEY && RF.KEY.tidPool) || 'rf_tid_pool';
+    const cap = (globalThis.RFTidPool && RFTidPool.CAP) || 256;
+    let pool = [];
+    try {
+      const r = await chrome.storage.local.get(key);
+      pool = r[key] || [];
+    } catch {
+      sumEl.textContent = '读池失败(扩展可能已 reload, 请 F5)';
+      tbody.innerHTML = '';
+      return;
+    }
+    const now = Date.now();
+    // 按短类型名汇总: 总数 / 冷却已过可取
+    const by = new Map();
+    for (const e of pool) {
+      const label = tidShortLabel(e.p);
+      const ready = now - Math.max(e.at || 0, e.ok || 0) >= TID_CD_MS;
+      let g = by.get(label);
+      if (!g) { g = { total: 0, ready: 0 }; by.set(label, g); }
+      g.total++;
+      if (ready) g.ready++;
+    }
+    const parts = [...by.entries()]
+      .sort((a, b) => b[1].total - a[1].total)
+      .map(([k, v]) => `${k} ${v.ready}/${v.total} 就绪`);
+    sumEl.textContent = pool.length
+      ? `共 ${pool.length}/${cap} · ${parts.join(' · ')}`
+      : `空池 0/${cap}——刷 x.com 或点「手动供血」入库`;
+    tbody.innerHTML = pool.map((e) => {
+      const base = Math.max(e.at || 0, e.ok || 0);
+      const left = Math.max(0, TID_CD_MS - (now - base));
+      const ready = left === 0;
+      const st = ready
+        ? '<span class="pill st-done">就绪</span>'
+        : '<span class="pill st-pending">冷却</span>';
+      const prefix = esc((e.t || '').slice(0, 12)) + (e.t && e.t.length > 12 ? '…' : '');
+      const pathFull = esc(e.p || '');
+      return `<tr>
+        <td>${esc(tidShortLabel(e.p))}</td>
+        <td>${st}</td>
+        <td>${tidAgeText(now - (e.at || now))}</td>
+        <td>${ready ? '—' : tidAgeText(left)}</td>
+        <td title="${esc(e.t || '')}"><code>${prefix}</code></td>
+        <td class="hint" title="${pathFull}" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${pathFull}</td>
+      </tr>`;
+    }).join('');
   }
 
   // 渲染去抖: storage 变化频繁(循环每次关注/日志/tid 入库都写), 合并短窗内的连续触发
@@ -152,7 +218,7 @@
       const canSearch = canHost && !extra.searching && !extra.scanning;
       const canScan = canHost && !extra.searching && !extra.scanning;
       btns.push(`<button class="ghost" data-taskop="af-search" ${off(canSearch)} title="${canHost ? '翻页搜索帖子入池(任意 x.com 标签页在线即可, Route 1 直连)' : '需任意 x.com 标签页在线(打开 x.com 即可)'}">抓取互关帖</button>`);
-      btns.push(`<button class="ghost" data-taskop="af-scan" ${off(canScan)} title="${canHost ? `跨标签连扫到期帖, 补待关注到 ${RF.AF.MANUAL_SCAN_TARGET}` : '需任意 x.com 标签页在线(打开 x.com 即可)'}">扫描帖子</button>`);
+      btns.push(`<button class="ghost" data-taskop="af-scan" ${off(canScan)} title="${canHost ? `连扫到期帖补待关注到 ${RF.AF.MANUAL_SCAN_TARGET}; 与开始/暂停无关, 只补队列` : '需任意 x.com 标签页在线(打开 x.com 即可)'}">扫描帖子</button>`);
     }
     return `<div class="ops">${btns.join('')}</div>`;
   }
@@ -172,6 +238,31 @@
     `;
   }
 
+  // 连扫/抓取进度是否仍算「进行中」: 无心跳或超过 15 分钟未更新 → 视为宿主中断卡死, 清标志解按钮
+  const AF_PROGRESS_STALE_MS = 15 * 60_000;
+  function clearStaleAfProgress(afp, afsp) {
+    const now = Date.now();
+    const stale = (p) => p && p.running && (!p.updatedAt || now - p.updatedAt > AF_PROGRESS_STALE_MS);
+    if (stale(afsp)) {
+      chrome.storage.local.set({
+        [RF.KEY.afScanProgress]: Object.assign({}, afsp, {
+          running: false, finishedAt: now, updatedAt: now,
+          stopReason: afsp.updatedAt ? '进度超时(可能宿主中断)' : '清除卡死标志',
+        }),
+      });
+      afsp = Object.assign({}, afsp, { running: false });
+    }
+    if (stale(afp)) {
+      chrome.storage.local.set({
+        [RF.KEY.afProgress]: Object.assign({}, afp, {
+          running: false, finishedAt: now, updatedAt: now,
+        }),
+      });
+      afp = Object.assign({}, afp, { running: false });
+    }
+    return { afp, afsp };
+  }
+
   function afScanChip(afsp) {
     if (!afsp) return '';
     if (afsp.running) {
@@ -184,6 +275,7 @@
   }
 
   function renderAfCard(h, af, tab, afp, afsp) {
+    ({ afp, afsp } = clearStaleAfProgress(afp, afsp));
     const el = $('dash-af');
     const st = stateOf(af);
     const q = (af && af.queue) || [];
@@ -304,6 +396,7 @@
   const postLink = (id) => `<a href="https://x.com/i/web/status/${esc(id)}" target="_blank">${esc(id)}</a>`;
 
   function renderAfDetail(h, af, afp, afsp) {
+    ({ afp, afsp } = clearStaleAfProgress(afp, afsp));
     const st = stateOf(af);
     const q = (af && af.queue) || [];
     const c = countsOf(q);

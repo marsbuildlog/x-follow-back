@@ -114,7 +114,7 @@
       <button id="btn-af-resume" class="ghost" data-taskop="af-resume">恢复</button>
       <select id="af-search-tag" title="抓取哪个互关标签下的帖子" style="padding:4px 8px;border:1px solid #cbd3d9;border-radius:8px;font-size:13px;background:#fff;color:#0f1419"></select>
       <button id="btn-af-search" class="ghost" data-taskop="af-search" title="任意 x.com 标签页在线即可: 翻页搜索帖子入池(Route 1 直连, 无需打开标签页)">抓取互关帖</button>
-      <button id="btn-af-scan" class="ghost" data-taskop="af-scan" title="跨标签连扫到期帖的回复, 补待关注到 300(任意 x.com 标签页在线即可)">扫描帖子</button>
+      <button id="btn-af-scan" class="ghost" data-taskop="af-scan" title="跨标签连扫到期帖补待关注到 300; 与开始/暂停无关, 只补队列(任意 x.com 页在线即可)">扫描帖子</button>
       <span id="af-tag-buttons" class="row" style="margin:0;gap:4px"></span>
       <span id="af-op-result" class="hint" data-opresult></span>
     </section>
@@ -229,9 +229,20 @@
       <div class="hint">对目标净变化为零(关注后立即取关)。生产路径已切 Route 1 直连, 传输失败才兑底页面重放; 本实验用于复核头形态。</div>
       <pre id="fp-out" style="display:none;margin-top:8px"></pre>
     </section>
+    <h3 class="sect">tid 池 <span class="hint">rf_tid_pool · 容量 256 · 同路径冷却约 70s · storage 变化自动刷新</span></h3>
+    <section>
+      <div id="tid-pool-summary" class="hint">加载中…</div>
+      <div class="table-wrap" style="max-height:280px;margin-top:6px">
+        <table id="tid-pool-table">
+          <thead><tr><th>类型</th><th>状态</th><th>年龄</th><th>冷却剩</th><th>tid 前缀</th><th title="完整捕获路径">路径</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
   </div>
 
   <script src="../shared/constants.js"></script>
+  <script src="../shared/tidpool.js"></script>
   <script src="options.js"></script>
 </body>
 </html>
