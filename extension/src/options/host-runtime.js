@@ -600,20 +600,27 @@
 
       const seen = new Set();
       const users = all.filter((u) => (seen.has(u.userId) ? false : (seen.add(u.userId), true)));
+      const exempt = await store.get(K.diffExempt + ':' + handle, null);
+      const exemptIds = new Set(((exempt && exempt.users) || []).map((x) => String(x.userId)));
       const notBack = users
         .filter((u) => !u.followedBy)
+        .filter((u) => !exemptIds.has(String(u.userId)))
         .map((u) => ({
           userId: u.userId, screenName: u.screenName, name: u.name,
           description: u.description || '',
           followersCount: u.followersCount, friendsCount: u.friendsCount,
         }));
+      const exemptSkipped = users.filter((u) => !u.followedBy && exemptIds.has(String(u.userId))).length;
       await store.set(K.diff + ':' + handle, {
         handle, ts: Date.now(), total: users.length, notBackCount: notBack.length,
         incomplete: incomplete || undefined,
         users: notBack,
       });
       await store.set(K.diffProgress, { handle, running: false, ts: Date.now() });
-      await log(`未回关名单更新${incomplete ? '(可能不全)' : ''}: 我关注${users.length}, 其中未回关${notBack.length}`);
+      await log(
+        `未回关名单更新${incomplete ? '(可能不全)' : ''}: 我关注${users.length}, 其中未回关${notBack.length}`
+        + (exemptSkipped ? `(另有${exemptSkipped}人在免取关名单已跳过)` : '')
+      );
       return {
         ok: true,
         message: `拉取完成: 我关注${users.length}, 未回关${notBack.length}` + (incomplete ? '(可能不全)' : ''),
@@ -643,9 +650,11 @@
       }
       const key = K.diff + ':' + handle;
       const diff = await store.get(key, null);
-      const queue = ((diff && diff.users) || []).filter((u) => u && u.userId);
+      const exempt = await store.get(K.diffExempt + ':' + handle, null);
+      const exemptIds = new Set(((exempt && exempt.users) || []).map((x) => String(x.userId)));
+      const queue = ((diff && diff.users) || []).filter((u) => u && u.userId && !exemptIds.has(String(u.userId)));
       if (!queue.length) {
-        return { ok: false, message: '名单为空——先拉取未回关名单' };
+        return { ok: false, message: '名单为空——先拉取未回关名单(免取关名单中的人不会被取关)' };
       }
       const settings = await getSettings();
       const total = queue.length;

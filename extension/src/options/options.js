@@ -91,12 +91,12 @@
     const tab = await findXTab();
     renderHost(h, tab);
 
-    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, afsp = null, lw = null, diff = null, diffp = null, difu = null;
+    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, afsp = null, lw = null, diff = null, diffp = null, difu = null, dife = null;
     if (h) {
       const tk = `rf_task:${h}`, dk = `rf_daily:${h}`, ak = `rf_af_task:${h}`;
       const r = await chrome.storage.local.get([
         tk, dk, ak, 'rf_fetch_progress', RF.KEY.afProgress, RF.KEY.afScanProgress, RF.KEY.loopWait,
-        RF.KEY.diff + ':' + h, RF.KEY.diffProgress, RF.KEY.diffUnfollowProgress,
+        RF.KEY.diff + ':' + h, RF.KEY.diffProgress, RF.KEY.diffUnfollowProgress, RF.KEY.diffExempt + ':' + h,
       ]);
       fb = r[tk];
       af = r[ak];
@@ -109,6 +109,7 @@
       diff = r[RF.KEY.diff + ':' + h];
       diffp = r[RF.KEY.diffProgress] || null;
       difu = r[RF.KEY.diffUnfollowProgress] || null;
+      dife = r[RF.KEY.diffExempt + ':' + h] || null;
     }
     renderFbCard(h, fb, daily, fp, tab);
     renderAfCard(h, af, tab, afp, afsp);
@@ -116,7 +117,7 @@
     renderGuideAf(h, af);
     renderFbDetail(h, fb, daily, fp, tab);
     renderAfDetail(h, af, afp, afsp);
-    renderDiffView(h, diff, diffp, difu);
+    renderDiffView(h, diff, diffp, difu, dife);
     renderLog();
     renderReadyCard(h);
     if (isDev) renderTidPool();
@@ -593,7 +594,7 @@
     : '';
 
   // ---------- 未回关名单 Tab: 我关注了但对方没关注我 ----------
-  function renderDiffView(h, diff, diffp, difu) {
+  function renderDiffView(h, diff, diffp, difu, dife) {
     const stateEl = $('diff-state');
     const tbody = $('diff-table') && $('diff-table').querySelector('tbody');
     if (!tbody) return;
@@ -603,6 +604,7 @@
     const stopBtn = $('btn-diff-unfollow-stop');
     const fetching = !!(diffp && diffp.running);
     const unfollowing = !!(difu && difu.running);
+    const exemptN = ((dife && dife.users) || []).length;
     if (!h) {
       stateEl.textContent = '状态: 未识别账号——打开 x.com 登录后自动识别';
       tbody.innerHTML = '';
@@ -631,12 +633,48 @@
     if (fetchBtn) fetchBtn.disabled = fetching || unfollowing;
     if (unfollowBtn) unfollowBtn.disabled = fetching || unfollowing || !users.length;
     if (stopBtn) stopBtn.disabled = !unfollowing;
+    const actOff = fetching || unfollowing ? ' disabled' : '';
     tbody.innerHTML = users.slice(0, MAX_ROWS).map((u) =>
-      `<tr><td>@${esc(u.screenName)}</td><td>${esc(u.name)}</td><td>${esc(u.description)}</td><td>${u.followersCount ?? 0}</td><td>${u.friendsCount ?? 0}</td></tr>`
+      `<tr>`
+      + `<td>@${esc(u.screenName)}</td><td>${esc(u.name)}</td><td>${esc(u.description)}</td>`
+      + `<td>${u.followersCount ?? 0}</td><td>${u.friendsCount ?? 0}</td>`
+      + `<td><button type="button" class="ghost" data-diff-exempt="${esc(u.userId)}"${actOff}>加入免取关</button></td>`
+      + `</tr>`
     ).join('');
-    summaryEl.textContent = users.length
-      ? `我关注 ${diff.total} 人 · 未回关 ${diff.notBackCount} 人(表格最多展示 ${MAX_ROWS} 行, 全量请导出 CSV)`
-      : '';
+    if (users.length || exemptN) {
+      summaryEl.textContent = `我关注 ${diff ? diff.total : '—'} 人 · 未回关 ${diff ? diff.notBackCount : users.length} 人`
+        + (exemptN ? ` · 免取关 ${exemptN} 人` : '')
+        + `(表格最多展示 ${MAX_ROWS} 行, 全量请导出 CSV)`;
+    } else {
+      summaryEl.textContent = '';
+    }
+  }
+
+  // 加入免取关: 写入 fb_diff_exempt:{handle}, 并从当前未回关名单移除(下次拉取也会跳过)
+  async function addDiffExempt(userId) {
+    const { rf_active: h } = await chrome.storage.local.get('rf_active');
+    if (!h) { showOp('diff-op-result', '未识别到登录账号'); return; }
+    const uid = String(userId || '');
+    if (!uid) return;
+    const dkey = RF.KEY.diff + ':' + h;
+    const ekey = RF.KEY.diffExempt + ':' + h;
+    const snap = await chrome.storage.local.get([dkey, ekey]);
+    const diff = snap[dkey];
+    const user = ((diff && diff.users) || []).find((u) => String(u.userId) === uid);
+    if (!user) { showOp('diff-op-result', '名单里已没有此人'); scheduleRender(0); return; }
+    const exemptUsers = ((snap[ekey] && snap[ekey].users) || []).slice();
+    if (!exemptUsers.some((u) => String(u.userId) === uid)) {
+      exemptUsers.push({
+        userId: user.userId, screenName: user.screenName, name: user.name, ts: Date.now(),
+      });
+    }
+    const users = diff.users.filter((u) => String(u.userId) !== uid);
+    await chrome.storage.local.set({
+      [ekey]: { handle: h, users: exemptUsers, ts: Date.now() },
+      [dkey]: Object.assign({}, diff, { users, notBackCount: users.length }),
+    });
+    showOp('diff-op-result', `已加入免取关: @${user.screenName || uid}`);
+    scheduleRender(0);
   }
 
   // 未回关名单 CSV 导出(全量, 带 BOM 方便 Excel 直开中文)
@@ -683,6 +721,12 @@
     scheduleRender(0);
   }
   document.addEventListener('click', (ev) => {
+    const exemptBtn = ev.target.closest('[data-diff-exempt]');
+    if (exemptBtn) {
+      if (exemptBtn.disabled) return;
+      addDiffExempt(exemptBtn.dataset.diffExempt).catch((e) => showOp('diff-op-result', String(e)));
+      return;
+    }
     const openBtn = ev.target.closest('[data-ready-open]');
     if (openBtn) {
       chrome.tabs.create({ url: openBtn.dataset.readyOpen });

@@ -74,7 +74,7 @@
   // Following/Followers 列表响应 → 用户列表(含 bio 与计数) + 翻页游标。
   // 与 parseFollowers 同构, 但额外提取展示字段: description(bio)/followersCount/friendsCount,
   // 并兼容 Following 接口的响应形态(data.user.result.timeline.timeline.instructions)。
-  // 身份/关注状态字段兼容策略与 parseFollowers 相同(legacy.* → core.user_legacy.* → core.*)。
+  // 新版 schema: bio→profile_bio.description, 计数→relationship_counts; 旧版仍读 legacy.*。
   function parseFollowList(body) {
     const out = { users: [], cursor: null, error: null, firstRaw: null };
     let data;
@@ -97,13 +97,16 @@
           if (!out.firstRaw) out.firstRaw = JSON.stringify(r).slice(0, 4000);
           const legacy = r.legacy || r.core?.user_legacy || {};
           const rel = r.relationship_perspectives || {};
+          const counts = r.relationship_counts || {};
+          const bio = (r.profile_bio && r.profile_bio.description) || '';
+          const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
           out.users.push({
             userId: r.rest_id || r.core?.id_str,
             screenName: legacy.screen_name || r.core?.screen_name || '',
             name: legacy.name || r.core?.name || '',
-            description: legacy.description || legacy.formattedDescription || '',
-            followersCount: legacy.followers_count ?? 0,
-            friendsCount: legacy.friends_count ?? 0,
+            description: bio || legacy.description || legacy.formattedDescription || '',
+            followersCount: num(legacy.followers_count) ?? num(counts.followers) ?? 0,
+            friendsCount: num(legacy.friends_count) ?? num(counts.following) ?? 0,
             following: !!(rel.following ?? legacy.following ?? r.following ?? false),
             followedBy: !!(rel.followed_by ?? legacy.followed_by),
           });

@@ -15,6 +15,7 @@ const RF = {
     diff: 'fb_diff',       // 前缀, 实际键 fb_diff:{handle}(未回关名单: 我关注但对方没关注我)
     diffProgress: 'fb_diff_progress', // 未回关名单拉取进度(面板展示用)
     diffUnfollowProgress: 'fb_diff_unfollow_progress', // 未回关名单批量取关进度
+    diffExempt: 'fb_diff_exempt', // 前缀, 实际键 fb_diff_exempt:{handle}(免取关名单, 拉取/批量取关都会跳过)
     afProgress: 'rf_af_progress', // 主动关注搜索进度(面板展示用)
     afScanProgress: 'rf_af_scan_progress', // 主动关注手动连扫进度(面板展示用)
     active: 'rf_active', // 最近活跃账号(options/popup 无页面上下文时定位任务)

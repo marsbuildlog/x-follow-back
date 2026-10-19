@@ -149,6 +149,23 @@ test('parseFollowList: 缺 legacy 时计数回退为 0 不炸', () => {
   assert.equal(out.users[0].friendsCount, 0);
 });
 
+test('parseFollowList: 新版 schema 取 profile_bio + relationship_counts', () => {
+  const r = {
+    __typename: 'User',
+    rest_id: '3001',
+    core: { name: 'New Schema', screen_name: 'newschema' },
+    profile_bio: { description: 'from profile_bio' },
+    relationship_counts: { followers: 888, following: 66 },
+    relationship_perspectives: { followed_by: false, following: true },
+  };
+  const out = parseFollowList(wrap([userEntry(r)]));
+  assert.equal(out.error, null);
+  assert.equal(out.users[0].description, 'from profile_bio');
+  assert.equal(out.users[0].followersCount, 888);
+  assert.equal(out.users[0].friendsCount, 66);
+  assert.equal(out.users[0].followedBy, false);
+});
+
 test('parseFollowList: errors 响应返回 error', () => {
   const out = parseFollowList(JSON.stringify({ errors: [{ code: 88, message: 'Rate limit exceeded' }] }));
   assert.match(out.error, /Rate limit/);
