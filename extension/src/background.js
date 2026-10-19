@@ -41,6 +41,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse({ error: String((e && e.message) || e), transport: true }));
     return true;
   }
+  if (msg.cmd === 'route1-unfollow') {
+    // destroy.json 直连(与 create 同形态); 未回关名单批量取关用
+    withTimeout(route1Unfollow(msg.userId), 30_000, 'route1-unfollow')
+      .then(sendResponse)
+      .catch((e) => sendResponse({ error: String((e && e.message) || e), transport: true }));
+    return true;
+  }
   if (msg.cmd === 'route1-graphql') {
     // vars = 变量补丁(含 null 值删键语义, 见 RFRoute1.mergeVariables)
     route1Graphql(msg.op, msg.vars || {})
@@ -291,12 +298,13 @@ async function v11Call(action, userId, tid) {
   return { status: res.status, ok: res.ok, body, rl: parseRlHeaders(res) };
 }
 
-// 生产: 关注一人。先无 tid, tid 拒收再试池内最新 tid; 传输失败返回 {error, transport:true}。
-async function route1Follow(userId) {
+// 生产: 关注/取关一人。先无 tid, tid 拒收再试池内最新 tid; 传输失败返回 {error, transport:true}。
+async function route1Friendship(action, userId) {
   const id = String(userId || '').trim();
   if (!id) return { error: '缺少 userId', transport: true };
+  if (action !== 'create' && action !== 'destroy') return { error: '非法 action', transport: true };
 
-  const first = await v11Call('create', id, null);
+  const first = await v11Call(action, id, null);
   if (first.transport || first.error) return { error: first.error || '直连失败', transport: true };
 
   const rejectTid = globalThis.RFRoute1.isTidRejectedFollow(first.status, first.body);
@@ -310,7 +318,7 @@ async function route1Follow(userId) {
     return { error: 'Route 1 tid 拒收且池空', transport: true, status: first.status };
   }
 
-  const second = await v11Call('create', id, tidEntry.t);
+  const second = await v11Call(action, id, tidEntry.t);
   if (second.transport || second.error) return { error: second.error || '直连失败', transport: true };
   try {
     const { [TID_KEY]: p2 } = await chrome.storage.local.get(TID_KEY);
@@ -320,6 +328,8 @@ async function route1Follow(userId) {
   } catch {}
   return { status: second.status, ok: second.ok, body: second.body, rl: second.rl, via: 'pool-tid' };
 }
+async function route1Follow(userId) { return route1Friendship('create', userId); }
+async function route1Unfollow(userId) { return route1Friendship('destroy', userId); }
 
 async function followProbe(handle) {
   const h = String(handle || '').trim().replace(/^@/, '');
@@ -511,7 +521,12 @@ async function route1Graphql(op, vars) {
   // GraphQL 只取同路径(跨路径不对称: Search→Detail 可行、Detail→Search 404, 见 ADR-0004)
   const tidEntry = globalThis.RFTidPool.pick(pool, { path: tpl.p, cooldownMs: RF.AF.TID_COOLDOWN_MS });
   if (!tidEntry) {
-    harvestBoost('池见底').catch(() => {}); // 异步供血(本发照常报错走回退, 下几发受益)
+    // harvestBoost 只开搜索小窗收 SearchTimeline tid; Following 等同路径帮不上, 改提示用户开页旁听
+    if (op === 'Following') {
+      bgLog('池见底(Following): 自动搜索供血帮不上——请打开自己的 /following 页面并等加载完, 旁听补同路径 tid(约70秒冷却后可用)').catch(() => {});
+    } else {
+      harvestBoost('池见底').catch(() => {}); // 异步供血(本发照常报错走回退, 下几发受益)
+    }
     return { error: '池中无同路径可用 tid(全在冷却)' };
   }
   // 变量 = 首见形状 + 补丁(null 值删键: cursor 缺省/screen_name 等由调用方表达)

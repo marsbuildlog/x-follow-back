@@ -91,10 +91,13 @@
     const tab = await findXTab();
     renderHost(h, tab);
 
-    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, afsp = null, lw = null, diff = null, diffp = null;
+    let fb = null, af = null, daily = { followed: 0 }, fp = null, afp = null, afsp = null, lw = null, diff = null, diffp = null, difu = null;
     if (h) {
       const tk = `rf_task:${h}`, dk = `rf_daily:${h}`, ak = `rf_af_task:${h}`;
-      const r = await chrome.storage.local.get([tk, dk, ak, 'rf_fetch_progress', RF.KEY.afProgress, RF.KEY.afScanProgress, RF.KEY.loopWait, RF.KEY.diff + ':' + h, RF.KEY.diffProgress]);
+      const r = await chrome.storage.local.get([
+        tk, dk, ak, 'rf_fetch_progress', RF.KEY.afProgress, RF.KEY.afScanProgress, RF.KEY.loopWait,
+        RF.KEY.diff + ':' + h, RF.KEY.diffProgress, RF.KEY.diffUnfollowProgress,
+      ]);
       fb = r[tk];
       af = r[ak];
       daily = r[dk] && r[dk].date === todayStr() ? r[dk] : { followed: 0 };
@@ -105,6 +108,7 @@
       loopWaitInfo = lw;
       diff = r[RF.KEY.diff + ':' + h];
       diffp = r[RF.KEY.diffProgress] || null;
+      difu = r[RF.KEY.diffUnfollowProgress] || null;
     }
     renderFbCard(h, fb, daily, fp, tab);
     renderAfCard(h, af, tab, afp, afsp);
@@ -112,7 +116,7 @@
     renderGuideAf(h, af);
     renderFbDetail(h, fb, daily, fp, tab);
     renderAfDetail(h, af, afp, afsp);
-    renderDiffView(h, diff, diffp);
+    renderDiffView(h, diff, diffp, difu);
     renderLog();
     renderReadyCard(h);
     if (isDev) renderTidPool();
@@ -589,21 +593,33 @@
     : '';
 
   // ---------- 未回关名单 Tab: 我关注了但对方没关注我 ----------
-  function renderDiffView(h, diff, diffp) {
+  function renderDiffView(h, diff, diffp, difu) {
     const stateEl = $('diff-state');
     const tbody = $('diff-table') && $('diff-table').querySelector('tbody');
     if (!tbody) return;
     const summaryEl = $('diff-summary');
     const fetchBtn = $('btn-diff-fetch');
+    const unfollowBtn = $('btn-diff-unfollow');
+    const stopBtn = $('btn-diff-unfollow-stop');
+    const fetching = !!(diffp && diffp.running);
+    const unfollowing = !!(difu && difu.running);
     if (!h) {
       stateEl.textContent = '状态: 未识别账号——打开 x.com 登录后自动识别';
       tbody.innerHTML = '';
       summaryEl.textContent = '';
       if (fetchBtn) fetchBtn.disabled = true;
+      if (unfollowBtn) unfollowBtn.disabled = true;
+      if (stopBtn) stopBtn.disabled = true;
       return;
     }
-    if (diffp && diffp.running) {
+    if (unfollowing) {
+      stateEl.textContent = `状态: 取关中 ${difu.done ?? 0}/${difu.total ?? '?'} · 成功${difu.ok ?? 0} 失败${difu.fail ?? 0}`
+        + (difu.current ? ` · 当前 @${difu.current}` : '');
+    } else if (fetching) {
       stateEl.textContent = `状态: 拉取中(第${diffp.page}/${diffp.maxPages}页, 已读${diffp.users}人)`;
+    } else if (difu && difu.finishedAt && Date.now() - difu.finishedAt < 120_000) {
+      stateEl.textContent = `状态: 上次取关结束 — 成功${difu.ok ?? 0} 跳过${difu.skip ?? 0} 失败${difu.fail ?? 0}`
+        + (difu.stopReason ? `(${difu.stopReason})` : '');
     } else if (diffp && diffp.error) {
       stateEl.textContent = '状态: 上次拉取失败 — ' + diffp.error;
     } else if (diff) {
@@ -611,8 +627,10 @@
     } else {
       stateEl.textContent = '状态: 未拉取——先打开一次自己的 /following 页面(捕获模板), 再点「拉取名单」';
     }
-    if (fetchBtn) fetchBtn.disabled = !!(diffp && diffp.running);
     const users = (diff && diff.users) || [];
+    if (fetchBtn) fetchBtn.disabled = fetching || unfollowing;
+    if (unfollowBtn) unfollowBtn.disabled = fetching || unfollowing || !users.length;
+    if (stopBtn) stopBtn.disabled = !unfollowing;
     tbody.innerHTML = users.slice(0, MAX_ROWS).map((u) =>
       `<tr><td>@${esc(u.screenName)}</td><td>${esc(u.name)}</td><td>${esc(u.description)}</td><td>${u.followersCount ?? 0}</td><td>${u.friendsCount ?? 0}</td></tr>`
     ).join('');
@@ -642,9 +660,22 @@
     showOp('diff-op-result', `已导出 ${users.length} 条`);
   };
 
-  // ---------- 操作按钮: ADR-0010 全部交给本页 RFHost(含未回关名单拉取) ----------
+  // ---------- 操作按钮: ADR-0010 全部交给本页 RFHost(含未回关名单拉取/批量取关) ----------
   async function taskAction(cmd, resultEl, extra) {
     if (!globalThis.RFHost) { showOp(resultEl, '宿主运行时未加载——请刷新控制台'); return; }
+    if (cmd === 'diff-unfollow') {
+      const { rf_active: h } = await chrome.storage.local.get('rf_active');
+      if (!h) { showOp(resultEl, '未识别到登录账号'); return; }
+      const key = RF.KEY.diff + ':' + h;
+      const diff = (await chrome.storage.local.get(key))[key];
+      const n = ((diff && diff.users) || []).length;
+      if (!n) { showOp(resultEl, '名单为空——先拉取未回关名单'); return; }
+      const ok = confirm(
+        `将对未回关名单中的 ${n} 人批量取关(全量, 非仅表格 ${MAX_ROWS} 行)。\n`
+        + '节奏与设置里的「关注间隔」相同, 可随时点「停止取关」。\n\n确定继续？'
+      );
+      if (!ok) { showOp(resultEl, '已取消'); return; }
+    }
     let res;
     try { res = await RFHost.dispatch(cmd, extra || {}); }
     catch (e) { showOp(resultEl, '执行失败: ' + ((e && e.message) || e)); return; }

@@ -131,6 +131,25 @@
     const why = (r1 && r1.error) ? `Route 1 失败(${r1.error}); ` : '';
     throw new Error(why + ((res && res.error) || '页面重放不可用'));
   }
+  // 取关: destroy.json 直连(与 create 同形态); 无页面重放兑底(未回关名单只走 Route 1)
+  async function unfollowUser(userId) {
+    const uid = String(userId);
+    const r1 = await sendBg({ cmd: 'route1-unfollow', userId: uid });
+    if (r1 && r1.status != null && !r1.transport) {
+      return { status: r1.status, ok: !!r1.ok, body: r1.body || '', rl: r1.rl || {}, via: r1.via || 'route1' };
+    }
+    throw new Error((r1 && r1.error) || '取关直连失败');
+  }
+  function unfollowSucceeded(res) {
+    const r = interpret(res);
+    if (r.ok) return { ok: true, rateLimited: false };
+    const body = String((res && res.body) || '');
+    // 已不在关注列表 / 幂等成功
+    if (/not following|You are not friends|already unfollowed|还未关注/i.test(body.slice(0, 2000))) {
+      return { ok: true, rateLimited: false, already: true };
+    }
+    return { ok: false, rateLimited: !!r.rateLimited, errorText: r.errorText };
+  }
 
   // ---------- 领导权锁(控制台优先 token 前缀 console-) ----------
   let myLockToken = null;
@@ -180,6 +199,8 @@
   let afBurstScanning = false;
   let fetchingFollowers = false;
   let fetchingDiff = false;
+  let unfollowingDiff = false;
+  let unfollowAbort = false;
 
   async function hasGqlTpl(op) {
     try {
@@ -480,8 +501,25 @@
   // ---------- 未回关名单(Route 1 Following) ----------
   // 翻页拉自己的 Following, 过滤 followedBy=false; 进度 fb_diff_progress, 结果 fb_diff:{handle}。
   // 前提: rf_tpl:Following 已捕获(先打开一次自己的 /following)。
+  // 页间受 FOLLOWING_MIN_GAP_MS 节流(同路径 tid 冷却 70s, 过快会烧穿池)。
+  let lastFollowingFireAt = 0;
+  async function awaitFollowingGap() {
+    const gap = AF.FOLLOWING_MIN_GAP_MS || 25_000;
+    const sinceFire = Date.now() - lastFollowingFireAt;
+    if (sinceFire < gap) {
+      const waitMs = gap - sinceFire;
+      await log(`未回关名单: 节奏控制, 等${Math.ceil(waitMs / 1000)}秒(防 tid 池烧穿)`);
+      try {
+        const cur = await store.get(K.diffProgress, null);
+        if (cur && cur.running) await store.set(K.diffProgress, Object.assign({}, cur, { ts: Date.now() }));
+      } catch {}
+      await sleepSegments(waitMs);
+    }
+    lastFollowingFireAt = Date.now();
+  }
   async function runDiffFetch() {
     if (fetchingDiff) return { ok: false, message: '已在拉取中, 请等本轮完成' };
+    if (unfollowingDiff) return { ok: false, message: '正在批量取关, 请先停止或等结束再拉取' };
     fetchingDiff = true;
     try {
       const handle = await activeHandle();
@@ -497,16 +535,32 @@
       let cursor = null;
       let page = 0;
       let retries = 0;
+      let tidRetries = 0;
       let incomplete = false;
       await store.set(K.diffProgress, {
         handle, running: true, page: 0, maxPages: MAX_PAGES, users: 0, ts: Date.now(),
       });
+      await log(`未回关名单发车: 页间节奏约 ${Math.round((AF.FOLLOWING_MIN_GAP_MS || 25_000) / 1000)} 秒/页`);
       while (page < MAX_PAGES) {
+        await awaitFollowingGap();
         const res = await sendBg({
           cmd: 'route1-graphql', op: OP_FOLLOWING,
           vars: { count, cursor: cursor || null },
         });
         if (res && res.error) {
+          // Following 供血稀: 池见底时提示开 /following 旁听, 并等冷却再试(搜索供血帮不上)
+          const tidEmpty = /无同路径可用 tid|全在冷却/.test(String(res.error));
+          if (tidEmpty && ++tidRetries <= 5) {
+            const waitMs = AF.TID_COOLDOWN_MS || 70_000;
+            await log(`未回关名单: Following tid 见底——请打开 https://x.com/${handle}/following 刷几下补 tid; ${Math.round(waitMs / 1000)}秒后重试第${page + 1}页(${tidRetries}/5)`);
+            try {
+              const cur = await store.get(K.diffProgress, null);
+              if (cur && cur.running) await store.set(K.diffProgress, Object.assign({}, cur, { ts: Date.now() }));
+            } catch {}
+            await sleepSegments(waitMs);
+            lastFollowingFireAt = 0; // 已等满冷却, 下一发不再叠页间 gap
+            continue;
+          }
           const msg = `未回关名单: Route 1 不可用(${res.error})——请先打开自己的 x.com/${handle}/following 页面并等它加载完(捕获模板), 再重新拉取`;
           await log('⚠ ' + msg);
           await store.set(K.diffProgress, { handle, running: false, error: msg, ts: Date.now() });
@@ -521,9 +575,11 @@
           const backoff = rateLimitBackoffMs(interpret(res), Date.now(), settings.rateLimitBackoffMin * 60_000);
           await log(`未回关名单: 拉取限流, ${Math.round(backoff / 1000)}秒后重试第${page + 1}页`);
           await sleepSegments(backoff);
+          lastFollowingFireAt = 0;
           continue;
         }
         retries = 0;
+        tidRetries = 0;
         const parsed = parseFollowList(res.body);
         if (parsed.error) throw new Error(parsed.error);
         if (page === 0 && parsed.firstRaw) {
@@ -539,7 +595,6 @@
         if (!parsed.cursor || parsed.cursor === cursor || parsed.users.length === 0) break;
         cursor = parsed.cursor;
         page++;
-        await sleep(800 + Math.random() * 700);
       }
       if (page >= MAX_PAGES) incomplete = true;
 
@@ -569,6 +624,115 @@
       return { ok: false, message: String(e) };
     } finally {
       fetchingDiff = false;
+    }
+  }
+
+  // ---------- 未回关名单批量取关(Route 1 destroy) ----------
+  // 按设置的关注间隔节奏逐个 destroy; 成功则从 fb_diff:{handle} 移除; 可随时停止。
+  async function runDiffUnfollow() {
+    if (unfollowingDiff) return { ok: false, message: '已在取关中, 请等本轮完成或先停止' };
+    if (fetchingDiff) return { ok: false, message: '正在拉取名单, 请等拉取完成再取关' };
+    unfollowingDiff = true;
+    unfollowAbort = false;
+    try {
+      const handle = await activeHandle();
+      if (!handle) {
+        const msg = '批量取关: 未识别到登录账号';
+        await log(msg);
+        return { ok: false, message: msg };
+      }
+      const key = K.diff + ':' + handle;
+      const diff = await store.get(key, null);
+      const queue = ((diff && diff.users) || []).filter((u) => u && u.userId);
+      if (!queue.length) {
+        return { ok: false, message: '名单为空——先拉取未回关名单' };
+      }
+      const settings = await getSettings();
+      const total = queue.length;
+      let done = 0, okN = 0, failN = 0, skipN = 0;
+      await store.set(K.diffUnfollowProgress, {
+        handle, running: true, total, done: 0, ok: 0, fail: 0, skip: 0,
+        current: null, ts: Date.now(),
+      });
+      await log(`批量取关发车: ${total} 人, 间隔 ${settings.intervalMin}~${settings.intervalMax} 秒`);
+
+      for (const u of queue) {
+        if (unfollowAbort) {
+          await log(`批量取关已停止: 成功${okN}, 跳过${skipN}, 失败${failN}, 剩余${total - done}`);
+          break;
+        }
+        const label = atName(u);
+        await store.set(K.diffUnfollowProgress, {
+          handle, running: true, total, done, ok: okN, fail: failN, skip: skipN,
+          current: u.screenName || u.userId, ts: Date.now(),
+        });
+
+        let attempts = 0;
+        let finished = false;
+        while (!finished && attempts < 4) {
+          if (unfollowAbort) break;
+          attempts++;
+          try {
+            const res = await unfollowUser(u.userId);
+            const verdict = unfollowSucceeded(res);
+            if (verdict.ok) {
+              // 从名单移除(按最新 storage, 防与其它写交叉)
+              const cur = await store.get(key, null);
+              const users = ((cur && cur.users) || []).filter((x) => String(x.userId) !== String(u.userId));
+              await store.set(key, Object.assign({}, cur || {}, {
+                users, notBackCount: users.length, ts: (cur && cur.ts) || Date.now(),
+              }));
+              if (verdict.already) { skipN++; await log(`批量取关: ${label} 已不在关注中, 移出名单`); }
+              else { okN++; await log(`批量取关: 已取关 ${label}`); }
+              finished = true;
+            } else if (verdict.rateLimited) {
+              const coolMs = (settings.humanCooldownMin || 0) * 60_000;
+              const backoff = rateLimitBackoffMs(interpret(res), Date.now(), settings.rateLimitBackoffMin * 60_000, 5000, coolMs);
+              await log(`批量取关: 限流, ${Math.round(backoff / 1000)}秒后重试 ${label}`);
+              await sleepSegments(backoff);
+            } else {
+              failN++;
+              await log(`批量取关失败: ${label} — ${verdict.errorText || '未知'}`);
+              finished = true;
+            }
+          } catch (e) {
+            failN++;
+            await log(`批量取关异常: ${label} — ${e}`);
+            finished = true;
+          }
+        }
+        if (!finished && !unfollowAbort) {
+          failN++;
+          await log(`批量取关放弃: ${label}(连续限流重试耗尽)`);
+        }
+        done++;
+        await store.set(K.diffUnfollowProgress, {
+          handle, running: true, total, done, ok: okN, fail: failN, skip: skipN,
+          current: u.screenName || u.userId, ts: Date.now(),
+        });
+        if (unfollowAbort || done >= total) break;
+        const gap = randInt(settings.intervalMin, settings.intervalMax) * 1000;
+        await sleepSegments(gap);
+      }
+
+      const stopped = unfollowAbort;
+      await store.set(K.diffUnfollowProgress, {
+        handle, running: false, total, done, ok: okN, fail: failN, skip: skipN,
+        finishedAt: Date.now(), ts: Date.now(),
+        stopReason: stopped ? '用户停止' : undefined,
+      });
+      await log(`批量取关结束${stopped ? '(已停止)' : ''}: 成功${okN}, 跳过${skipN}, 失败${failN}`);
+      return {
+        ok: true,
+        message: `取关结束: 成功${okN}, 跳过${skipN}, 失败${failN}` + (stopped ? '(已停止)' : ''),
+      };
+    } catch (e) {
+      await store.set(K.diffUnfollowProgress, { running: false, error: String(e), ts: Date.now() });
+      await log(`批量取关失败: ${e}`);
+      return { ok: false, message: String(e) };
+    } finally {
+      unfollowingDiff = false;
+      unfollowAbort = false;
     }
   }
 
@@ -983,9 +1147,20 @@
       case 'diff-fetch':
         // fire-and-forget(可达数分钟); 进度 fb_diff_progress + 日志
         if (fetchingDiff) return { ok: false, message: '已在拉取中, 请等本轮完成' };
+        if (unfollowingDiff) return { ok: false, message: '正在批量取关, 请先停止或等结束再拉取' };
         if (!h) return { ok: false, message: '未识别到登录账号——点就绪清单打开 x.com 完成识别' };
         runDiffFetch().catch((e) => log(`未回关名单拉取异常: ${e}`));
-        return { ok: true, message: '拉取已发车——进度见未回关名单状态行与日志(页间有节奏控制, 非卡住)' };
+        return { ok: true, message: '拉取已发车——进度见未回关名单状态行与日志(约25秒/页, 非卡住)' };
+      case 'diff-unfollow':
+        if (unfollowingDiff) return { ok: false, message: '已在取关中, 请等本轮完成或先停止' };
+        if (fetchingDiff) return { ok: false, message: '正在拉取名单, 请等拉取完成再取关' };
+        if (!h) return { ok: false, message: '未识别到登录账号——点就绪清单打开 x.com 完成识别' };
+        runDiffUnfollow().catch((e) => log(`批量取关异常: ${e}`));
+        return { ok: true, message: '批量取关已发车——进度见未回关名单状态行与日志(按关注间隔节奏)' };
+      case 'diff-unfollow-stop':
+        if (!unfollowingDiff) return { ok: false, message: '当前没有在跑的批量取关' };
+        unfollowAbort = true;
+        return { ok: true, message: '已请求停止——当前这个人结束后停下' };
       case 'reset-task':
         if (!h) return { ok: false, message: '无活跃账号' };
         await store.set(taskKey(h), null);
@@ -1001,7 +1176,7 @@
     const now = Date.now();
     try {
       const snap = await chrome.storage.local.get([
-        K.afProgress, K.afScanProgress, K.fetchProgress, K.diffProgress,
+        K.afProgress, K.afScanProgress, K.fetchProgress, K.diffProgress, K.diffUnfollowProgress,
       ]);
       const patch = {};
       const afp = snap[K.afProgress];
@@ -1025,9 +1200,15 @@
           running: false, ts: now, stopReason: '宿主重启/重载中断',
         });
       }
+      const difu = snap[K.diffUnfollowProgress];
+      if (difu && difu.running) {
+        patch[K.diffUnfollowProgress] = Object.assign({}, difu, {
+          running: false, finishedAt: now, ts: now, stopReason: '宿主重启/重载中断',
+        });
+      }
       if (Object.keys(patch).length) {
         await chrome.storage.local.set(patch);
-        await log('已清除重载前未结束的进度标志(抓取/连扫/拉粉/未回关名单), 按钮可再点');
+        await log('已清除重载前未结束的进度标志(抓取/连扫/拉粉/未回关名单/批量取关), 按钮可再点');
       }
     } catch {}
   }

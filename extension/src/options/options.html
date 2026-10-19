@@ -163,6 +163,8 @@
     <section class="row" style="margin:10px 0">
       <button id="btn-diff-fetch" data-taskop="diff-fetch">拉取名单</button>
       <button id="btn-diff-csv" class="ghost">导出 CSV</button>
+      <button id="btn-diff-unfollow" class="danger" data-taskop="diff-unfollow">批量取关</button>
+      <button id="btn-diff-unfollow-stop" class="ghost" data-taskop="diff-unfollow-stop" disabled>停止取关</button>
       <span id="diff-op-result" class="hint" data-opresult></span>
     </section>
     <div class="table-wrap">
@@ -172,7 +174,7 @@
       </table>
     </div>
     <div class="hint" id="diff-summary"></div>
-    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取在控制台 Route 1 直连执行(保持控制台打开), 页间有节奏控制, 大账号需要几分钟。表格最多展示 200 行, CSV 导出全量。</div>
+    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取在控制台 Route 1 直连执行(保持控制台打开), 页间约 25 秒节奏(防 tid 池烧穿), 大账号可能要十几分钟。表格最多展示 200 行, CSV 导出全量。「批量取关」按设置里的关注间隔节奏对名单全量取关(可随时停止), 成功后从名单移除。</div>
   </div>
 
   <!-- 设置 -->

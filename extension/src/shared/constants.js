@@ -14,6 +14,7 @@ const RF = {
     fetchProgress: 'rf_fetch_progress',
     diff: 'fb_diff',       // 前缀, 实际键 fb_diff:{handle}(未回关名单: 我关注但对方没关注我)
     diffProgress: 'fb_diff_progress', // 未回关名单拉取进度(面板展示用)
+    diffUnfollowProgress: 'fb_diff_unfollow_progress', // 未回关名单批量取关进度
     afProgress: 'rf_af_progress', // 主动关注搜索进度(面板展示用)
     afScanProgress: 'rf_af_scan_progress', // 主动关注手动连扫进度(面板展示用)
     active: 'rf_active', // 最近活跃账号(options/popup 无页面上下文时定位任务)
@@ -58,6 +59,9 @@ const RF = {
     // tid 收割池(ADR-0004)让连发成为可能, 但限流桶不变: 两次 SearchTimeline 发射至少隔 SEARCH_MIN_GAP_MS。
     TID_COOLDOWN_MS: 70 * 1000,
     SEARCH_MIN_GAP_MS: 30 * 1000, // 搜索/扫描发射节奏兼底: 50次/15分钟桶 ≈ 18s/发, 30s/发给页面自己的搜索留余量
+    // 未回关名单 Following 翻页: 同路径 tid 冷却 70s, 页间 ~1s 会瞬间烧穿池(Following 供血本来就稀)。
+    // 25s/页 ≈ 小池(2~3 条)可持续; 池见底另等 TID_COOLDOWN 重试。
+    FOLLOWING_MIN_GAP_MS: 25 * 1000,
     AUTO_SEARCH_COOLDOWN_MS: 60 * 60 * 1000, // 池子断供自动补池的冷却(2026-10-12): 抓过一轮后至少隔1小时再补——
                              // 搜索常只回旧帖(0 新帖), 无冷却会每 tick(30s)空烧限流桶
     POOL_MIN: 10,            // 池子存活帖(未扫完 scanCount<SCAN_MAX)低于此数即视为断供: 自动补池不等"无到期帖"——
