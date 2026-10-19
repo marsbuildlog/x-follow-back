@@ -1,4 +1,4 @@
-// 控制台宿主运行时(ADR-0010): 关注循环 + 抓取/连扫编排跑在 options 页。
+// 控制台宿主运行时(ADR-0010): 关注循环 + 抓取/连扫/未回关名单编排跑在 options 页。
 // 依赖: constants / logic / tidpool / route1 已挂 globalThis; 由 options.html 先于本文件加载。
 (() => {
   'use strict';
@@ -11,12 +11,13 @@
   const K = RF.KEY;
   const AF = RF.AF;
   const OP_FOLLOWERS = 'BlueVerifiedFollowers';
+  const OP_FOLLOWING = 'Following'; // 我关注的用户列表(未回关名单)
   const OP_SEARCH = 'SearchTimeline';
   const OP_TWEET_DETAIL = 'TweetDetail';
   const FOLLOW_API = '/i/api/1.1/friendships/create.json';
 
   const {
-    parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName,
+    parseFollowers, parseFollowList, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName,
     rateLimitBackoffMs, windowExhaustedWaitMs, parseSearchTimeline, parseTweetDetail, afEligible,
     pickNextItem, mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
     nextAutoSearchTag, shouldAutoSearch,
@@ -476,6 +477,101 @@
     return { ok: true, message: '连扫已发车——进度见控制台状态行与日志' };
   }
 
+  // ---------- 未回关名单(Route 1 Following) ----------
+  // 翻页拉自己的 Following, 过滤 followedBy=false; 进度 fb_diff_progress, 结果 fb_diff:{handle}。
+  // 前提: rf_tpl:Following 已捕获(先打开一次自己的 /following)。
+  async function runDiffFetch() {
+    if (fetchingDiff) return { ok: false, message: '已在拉取中, 请等本轮完成' };
+    fetchingDiff = true;
+    try {
+      const handle = await activeHandle();
+      if (!handle) {
+        const msg = '未回关名单: 未识别到登录账号, 跳过';
+        await log(msg);
+        return { ok: false, message: msg };
+      }
+      const settings = await getSettings();
+      const count = 100;
+      const MAX_PAGES = 500; // 100/页 → 5万关注上限
+      const all = [];
+      let cursor = null;
+      let page = 0;
+      let retries = 0;
+      let incomplete = false;
+      await store.set(K.diffProgress, {
+        handle, running: true, page: 0, maxPages: MAX_PAGES, users: 0, ts: Date.now(),
+      });
+      while (page < MAX_PAGES) {
+        const res = await sendBg({
+          cmd: 'route1-graphql', op: OP_FOLLOWING,
+          vars: { count, cursor: cursor || null },
+        });
+        if (res && res.error) {
+          const msg = `未回关名单: Route 1 不可用(${res.error})——请先打开自己的 x.com/${handle}/following 页面并等它加载完(捕获模板), 再重新拉取`;
+          await log('⚠ ' + msg);
+          await store.set(K.diffProgress, { handle, running: false, error: msg, ts: Date.now() });
+          return { ok: false, message: msg };
+        }
+        if (res.status === 429) {
+          if (++retries > 3) {
+            incomplete = true;
+            await log('未回关名单: 拉取连续限流, 先保存已拉到的部分, 稍后重新拉取补全');
+            break;
+          }
+          const backoff = rateLimitBackoffMs(interpret(res), Date.now(), settings.rateLimitBackoffMin * 60_000);
+          await log(`未回关名单: 拉取限流, ${Math.round(backoff / 1000)}秒后重试第${page + 1}页`);
+          await sleepSegments(backoff);
+          continue;
+        }
+        retries = 0;
+        const parsed = parseFollowList(res.body);
+        if (parsed.error) throw new Error(parsed.error);
+        if (page === 0 && parsed.firstRaw) {
+          await log('未回关名单: 用户对象结构样本: ' + parsed.firstRaw);
+        }
+        all.push(...parsed.users);
+        await store.set(K.diffProgress, {
+          handle, running: true, page: page + 1, maxPages: MAX_PAGES,
+          users: all.length, hasMore: !!parsed.cursor, ts: Date.now(),
+        });
+        await log(`未回关名单: 第${page + 1}页 +${parsed.users.length}, 累计${all.length}`);
+        // 列表拉完后接口仍可能返回非空 cursor, 0 人即视为拉完
+        if (!parsed.cursor || parsed.cursor === cursor || parsed.users.length === 0) break;
+        cursor = parsed.cursor;
+        page++;
+        await sleep(800 + Math.random() * 700);
+      }
+      if (page >= MAX_PAGES) incomplete = true;
+
+      const seen = new Set();
+      const users = all.filter((u) => (seen.has(u.userId) ? false : (seen.add(u.userId), true)));
+      const notBack = users
+        .filter((u) => !u.followedBy)
+        .map((u) => ({
+          userId: u.userId, screenName: u.screenName, name: u.name,
+          description: u.description || '',
+          followersCount: u.followersCount, friendsCount: u.friendsCount,
+        }));
+      await store.set(K.diff + ':' + handle, {
+        handle, ts: Date.now(), total: users.length, notBackCount: notBack.length,
+        incomplete: incomplete || undefined,
+        users: notBack,
+      });
+      await store.set(K.diffProgress, { handle, running: false, ts: Date.now() });
+      await log(`未回关名单更新${incomplete ? '(可能不全)' : ''}: 我关注${users.length}, 其中未回关${notBack.length}`);
+      return {
+        ok: true,
+        message: `拉取完成: 我关注${users.length}, 未回关${notBack.length}` + (incomplete ? '(可能不全)' : ''),
+      };
+    } catch (e) {
+      await store.set(K.diffProgress, { running: false, error: String(e), ts: Date.now() });
+      await log(`未回关名单拉取失败: ${e}`);
+      return { ok: false, message: String(e) };
+    } finally {
+      fetchingDiff = false;
+    }
+  }
+
   // ---------- 拉粉(Route 1) ----------
   // 进度字段与 content.js / 控制台 UI 对齐: {running, page, maxPages, users}
   async function runFetch(screenName) {
@@ -884,6 +980,12 @@
       case 'refresh-list':
         if (!h) return { ok: false, message: '未识别到登录账号' };
         return runFetch(h);
+      case 'diff-fetch':
+        // fire-and-forget(可达数分钟); 进度 fb_diff_progress + 日志
+        if (fetchingDiff) return { ok: false, message: '已在拉取中, 请等本轮完成' };
+        if (!h) return { ok: false, message: '未识别到登录账号——点就绪清单打开 x.com 完成识别' };
+        runDiffFetch().catch((e) => log(`未回关名单拉取异常: ${e}`));
+        return { ok: true, message: '拉取已发车——进度见未回关名单状态行与日志(页间有节奏控制, 非卡住)' };
       case 'reset-task':
         if (!h) return { ok: false, message: '无活跃账号' };
         await store.set(taskKey(h), null);

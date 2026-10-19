@@ -220,7 +220,7 @@
   // ---------- 总览: 宿主状态卡(ADR-0010: 本控制台即宿主) ----------
   function renderHost(h, tab) {
     const el = $('host-card');
-    el.innerHTML = `<h3>宿主</h3><span class="dot" style="background:#16a34a"></span> 控制台在线 <span class="hint">本页承载关注循环与抓取/连扫; 请保持打开。x.com 仅用于材料旁听与兑底${tab ? ' · 已有 x.com 标签页' : ' · 暂无 x.com 标签页'}${h ? ' · @' + esc(h) : ' · 未识别身份'}</span>
+    el.innerHTML = `<h3>宿主</h3><span class="dot" style="background:#16a34a"></span> 控制台在线 <span class="hint">本页承载关注循环、抓取/连扫与未回关名单拉取; 请保持打开。x.com 仅用于材料旁听与兑底${tab ? ' · 已有 x.com 标签页' : ' · 暂无 x.com 标签页'}${h ? ' · @' + esc(h) : ' · 未识别身份'}</span>
       <button id="host-open" style="margin:0 0 0 8px;padding:2px 12px;font-size:12px">${h ? '打开认证粉丝页' : '打开 x.com 识别'}</button>`;
     const b = $('host-open');
     if (b) b.onclick = () => chrome.tabs.create({ url: h ? `https://x.com/${h}/verified_followers` : 'https://x.com/home' });
@@ -594,10 +594,12 @@
     const tbody = $('diff-table') && $('diff-table').querySelector('tbody');
     if (!tbody) return;
     const summaryEl = $('diff-summary');
+    const fetchBtn = $('btn-diff-fetch');
     if (!h) {
       stateEl.textContent = '状态: 未识别账号——打开 x.com 登录后自动识别';
       tbody.innerHTML = '';
       summaryEl.textContent = '';
+      if (fetchBtn) fetchBtn.disabled = true;
       return;
     }
     if (diffp && diffp.running) {
@@ -609,6 +611,7 @@
     } else {
       stateEl.textContent = '状态: 未拉取——先打开一次自己的 /following 页面(捕获模板), 再点「拉取名单」';
     }
+    if (fetchBtn) fetchBtn.disabled = !!(diffp && diffp.running);
     const users = (diff && diff.users) || [];
     tbody.innerHTML = users.slice(0, MAX_ROWS).map((u) =>
       `<tr><td>@${esc(u.screenName)}</td><td>${esc(u.name)}</td><td>${esc(u.description)}</td><td>${u.followersCount ?? 0}</td><td>${u.friendsCount ?? 0}</td></tr>`
@@ -639,18 +642,8 @@
     showOp('diff-op-result', `已导出 ${users.length} 条`);
   };
 
-  // ---------- 操作按钮: ADR-0010 交给本页 RFHost; 未回关名单仍转发 x.com(尚未迁控制台) ----------
+  // ---------- 操作按钮: ADR-0010 全部交给本页 RFHost(含未回关名单拉取) ----------
   async function taskAction(cmd, resultEl, extra) {
-    if (cmd === 'diff-fetch') {
-      const tab = await findXTab();
-      if (!tab) { showOp(resultEl, '未找到 x.com 标签页——先打开自己的 /following'); return; }
-      let res;
-      try { res = await chrome.tabs.sendMessage(tab.id, { cmd: 'diff-fetch' }); }
-      catch (e) { showOp(resultEl, '发送失败: ' + e.message); return; }
-      showOp(resultEl, (res && res.message) || (res && res.ok ? '已执行' : '失败'));
-      scheduleRender(0);
-      return;
-    }
     if (!globalThis.RFHost) { showOp(resultEl, '宿主运行时未加载——请刷新控制台'); return; }
     let res;
     try { res = await RFHost.dispatch(cmd, extra || {}); }
