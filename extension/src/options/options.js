@@ -129,13 +129,19 @@
     let snap = {};
     try { snap = await chrome.storage.local.get(keys); } catch { el.textContent = '读 storage 失败'; return; }
     const { ready, items } = RFReadiness.evaluate(snap, handle);
+    const btnStyle = 'margin:0 0 0 8px;padding:1px 10px;font-size:12px';
     el.innerHTML = items.map((it) => {
       const mark = it.ok ? '✅' : (it.optional ? '○' : '❗');
-      const btn = (!it.ok && (it.action === 'open-url' || it.action === 'open-x') && it.url)
-        ? `<button type="button" class="ghost" data-ready-open="${esc(it.url)}" style="margin:0 0 0 8px;padding:1px 10px;font-size:12px">${esc(it.btnLabel || '打开')}</button>`
-        : (!it.ok && it.action === 'harvest')
-          ? `<button type="button" class="ghost" data-ready-harvest="1" style="margin:0 0 0 8px;padding:1px 10px;font-size:12px">手动供血</button>`
-          : '';
+      let btn = '';
+      if (!it.ok && Array.isArray(it.buttons) && it.buttons.length) {
+        btn = it.buttons.map((b) =>
+          `<button type="button" class="ghost" data-ready-open="${esc(b.url)}" style="${btnStyle}">${esc(b.label || '打开')}</button>`
+        ).join('');
+      } else if (!it.ok && (it.action === 'open-url' || it.action === 'open-x') && it.url) {
+        btn = `<button type="button" class="ghost" data-ready-open="${esc(it.url)}" style="${btnStyle}">${esc(it.btnLabel || '打开')}</button>`;
+      } else if (!it.ok && it.action === 'harvest') {
+        btn = `<button type="button" class="ghost" data-ready-harvest="1" style="${btnStyle}">手动供血</button>`;
+      }
       return `<div class="guide-line">${mark} <b>${esc(it.label)}</b> — ${esc(it.hint)}${btn}</div>`;
     }).join('') + `<div class="hint" style="margin-top:6px">${ready ? '必备材料已齐, 可开始任务' : '先补齐带 ❗ 的项(○ 为可选兑底)'}</div>`;
   }
