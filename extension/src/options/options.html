@@ -67,9 +67,13 @@
     <button data-view="debug" id="nav-debug" hidden>调试</button>
   </div>
 
-  <!-- 总览: 宿主状态 + 两任务卡(状态+操作, 组件复用) + 分业务引导 -->
+  <!-- 总览: 宿主状态 + 就绪清单(ADR-0010) + 两任务卡 + 分业务引导 -->
   <div class="view active" id="view-dashboard">
     <div class="card" id="host-card"></div>
+    <div class="card" id="ready-card">
+      <h3>运行所需材料 <span class="hint">缺哪项点按钮开页旁听; 成功后自动勾掉</span></h3>
+      <div id="ready-list" class="hint">加载中…</div>
+    </div>
     <div class="dash-grid">
       <div class="card" id="dash-fb"></div>
       <div class="card" id="dash-af"></div>
@@ -242,7 +246,11 @@
   </div>
 
   <script src="../shared/constants.js"></script>
+  <script src="../shared/logic.js"></script>
   <script src="../shared/tidpool.js"></script>
+  <script src="../shared/route1.js"></script>
+  <script src="../shared/readiness.js"></script>
+  <script src="host-runtime.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

@@ -1,10 +1,7 @@
 // 控制台: Tab 化(总览/回关/主动关注/设置/日志), hash 记忆停留页。
 // 数据编排: 每次渲染读 rf_active → 并行读 回关任务/主动关注任务/每日计数/两个进度 →
 //   分发到 总览卡(状态+操作组件)、各任务 Tab(状态行+操作+明细表)、引导卡。
-// 任务仍宿主在 x.com 页面内; 控制按钮经消息转发(start-task/pause-task/resume-task/
-//   refresh-list/start-af-task/af-search/af-scan), 抓取/连扫帚主任意 x.com 标签页
-//   (Route 1 直连不挑场; 抓取标签经消息指定、按配置校验)。
-// 页面只在两处被问到: ①tpl-captured(回关模板捕获状态, 异步增补) ②reset/start 等动作本身。
+// ADR-0010: 循环/抓取/连扫宿主=本页(RFHost); x.com 仅供血/兑底; 就绪清单引导开页旁听。
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
@@ -117,8 +114,30 @@
     renderAfDetail(h, af, afp, afsp);
     renderDiffView(h, diff, diffp);
     renderLog();
+    renderReadyCard(h);
     if (isDev) renderTidPool();
-    if (h) enrichFromPage(); // 模板捕获状态异步增补(仅页面可达时)
+  }
+
+  // ---------- 就绪清单(ADR-0010) ----------
+  async function renderReadyCard(handle) {
+    const el = $('ready-list');
+    if (!el || !globalThis.RFReadiness) return;
+    const keys = [
+      RF.KEY.settings, RF.KEY.bearer, RF.KEY.tidPool, RF.KEY.followTplSeen,
+      ...RFReadiness.GQL_OPS.map((op) => RF.KEY.gqlTpl + ':' + op.id),
+    ];
+    let snap = {};
+    try { snap = await chrome.storage.local.get(keys); } catch { el.textContent = '读 storage 失败'; return; }
+    const { ready, items } = RFReadiness.evaluate(snap, handle);
+    el.innerHTML = items.map((it) => {
+      const mark = it.ok ? '✅' : (it.optional ? '○' : '❗');
+      const btn = (!it.ok && (it.action === 'open-url' || it.action === 'open-x') && it.url)
+        ? `<button type="button" class="ghost" data-ready-open="${esc(it.url)}" style="margin:0 0 0 8px;padding:1px 10px;font-size:12px">打开</button>`
+        : (!it.ok && it.action === 'harvest')
+          ? `<button type="button" class="ghost" data-ready-harvest="1" style="margin:0 0 0 8px;padding:1px 10px;font-size:12px">手动供血</button>`
+          : '';
+      return `<div class="guide-line">${mark} <b>${esc(it.label)}</b> — ${esc(it.hint)}${btn}</div>`;
+    }).join('') + `<div class="hint" style="margin-top:6px">${ready ? '必备材料已齐, 可开始任务' : '先补齐带 ❗ 的项(○ 为可选兑底)'}</div>`;
   }
 
   // ---------- 调试: rf_tid_pool 按类型汇总 + 明细(仅 isDev) ----------
@@ -192,17 +211,13 @@
     renderTimer = setTimeout(render, delay);
   }
 
-  // ---------- 总览: 宿主状态卡 ----------
+  // ---------- 总览: 宿主状态卡(ADR-0010: 本控制台即宿主) ----------
   function renderHost(h, tab) {
     const el = $('host-card');
-    if (tab) {
-      el.innerHTML = `<h3>宿主</h3><span class="dot" style="background:#16a34a"></span> 宿主在线 <span class="hint">任意 x.com 标签页即可承载任务循环; 关闭全部页面任务会暂停并通知</span>`;
-    } else {
-      el.innerHTML = `<h3>宿主</h3><span class="dot" style="background:#d97706"></span> 宿主离线 <span class="hint">任务动作暂停(需页面宿主); 打开任意 x.com 页面自动继续</span>
-        <button id="host-open" style="margin:0 0 0 8px;padding:2px 12px;font-size:12px">打开认证粉丝页</button>`;
-      const b = $('host-open');
-      if (b) b.onclick = () => chrome.tabs.create({ url: h ? `https://x.com/${h}/verified_followers` : 'https://x.com/home' });
-    }
+    el.innerHTML = `<h3>宿主</h3><span class="dot" style="background:#16a34a"></span> 控制台在线 <span class="hint">本页承载关注循环与抓取/连扫; 请保持打开。x.com 仅用于材料旁听与兑底${tab ? ' · 已有 x.com 标签页' : ' · 暂无 x.com 标签页'}${h ? ' · @' + esc(h) : ' · 未识别身份'}</span>
+      <button id="host-open" style="margin:0 0 0 8px;padding:2px 12px;font-size:12px">${h ? '打开认证粉丝页' : '打开 x.com 识别'}</button>`;
+    const b = $('host-open');
+    if (b) b.onclick = () => chrome.tabs.create({ url: h ? `https://x.com/${h}/verified_followers` : 'https://x.com/home' });
   }
 
   // ---------- 总览: 任务卡(状态 + 操作组件, 回关/主动关注共用一套渲染) ----------
@@ -214,11 +229,11 @@
     btns.push(`<button class="ghost" data-taskop="${kind}-pause" ${off(state !== 'running')}>暂停</button>`);
     btns.push(`<button class="ghost" data-taskop="${kind}-resume" ${off(state !== 'paused')}>恢复</button>`);
     if (kind === 'af') {
-      const canHost = !!(extra && extra.host);
-      const canSearch = canHost && !extra.searching && !extra.scanning;
-      const canScan = canHost && !extra.searching && !extra.scanning;
-      btns.push(`<button class="ghost" data-taskop="af-search" ${off(canSearch)} title="${canHost ? '翻页搜索帖子入池(任意 x.com 标签页在线即可, Route 1 直连)' : '需任意 x.com 标签页在线(打开 x.com 即可)'}">抓取互关帖</button>`);
-      btns.push(`<button class="ghost" data-taskop="af-scan" ${off(canScan)} title="${canHost ? `连扫到期帖补待关注到 ${RF.AF.MANUAL_SCAN_TARGET}; 与开始/暂停无关, 只补队列` : '需任意 x.com 标签页在线(打开 x.com 即可)'}">扫描帖子</button>`);
+      // ADR-0010: 抓取/连扫由控制台宿主直发, 不要求 x.com 标签页
+      const canSearch = !(extra && extra.searching) && !(extra && extra.scanning);
+      const canScan = !(extra && extra.searching) && !(extra && extra.scanning);
+      btns.push(`<button class="ghost" data-taskop="af-search" ${off(canSearch)} title="翻页搜索帖子入池(控制台 Route 1 直连)">抓取互关帖</button>`);
+      btns.push(`<button class="ghost" data-taskop="af-scan" ${off(canScan)} title="连扫到期帖补待关注到 ${RF.AF.MANUAL_SCAN_TARGET}; 与开始/暂停无关, 只补队列">扫描帖子</button>`);
     }
     return `<div class="ops">${btns.join('')}</div>`;
   }
@@ -292,7 +307,7 @@
       <h3><span class="dot" style="background:${st.color}"></span>主动关注任务 ${h ? `<span class="hint">@${esc(h)}</span>` : ''}<button class="more" data-goto="activefollow">详情 →</button></h3>
       <div>状态: <b>${esc(st.text)}</b>${searching ? ` <span style="color:#7c3aed;font-weight:700">· 抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>` : ''}${afScanChip(afsp)}${loopWaitChip()}</div>
       <div>待关注 <span class="num">${c.pending}</span> / 队列 ${q.length} · 帖子池 ${poolTotal}${poolDue ? `(待扫 ${poolDue})` : ''}${water}</div>
-      ${h ? taskCardOps('af', af, { host: !!tab, searching, scanning }) : '<div class="hint">打开 x.com 登录后自动识别账号</div>'}
+      ${h ? taskCardOps('af', af, { searching, scanning }) : '<div class="hint">打开 x.com 登录后自动识别账号</div>'}
     `;
   }
 
@@ -610,20 +625,41 @@
     showOp('diff-op-result', `已导出 ${users.length} 条`);
   };
 
-  // ---------- 操作按钮: 经消息转发给页面内的任务循环 ----------
-  async function taskAction(cmd, picker, resultEl, noTabMsg, extra) {
-    const tab = await picker();
-    if (!tab) { showOp(resultEl, noTabMsg || '未找到 x.com 标签页'); return; }
+  // ---------- 操作按钮: ADR-0010 交给本页 RFHost; 未回关名单仍转发 x.com(尚未迁控制台) ----------
+  async function taskAction(cmd, resultEl, extra) {
+    if (cmd === 'diff-fetch') {
+      const tab = await findXTab();
+      if (!tab) { showOp(resultEl, '未找到 x.com 标签页——先打开自己的 /following'); return; }
+      let res;
+      try { res = await chrome.tabs.sendMessage(tab.id, { cmd: 'diff-fetch' }); }
+      catch (e) { showOp(resultEl, '发送失败: ' + e.message); return; }
+      showOp(resultEl, (res && res.message) || (res && res.ok ? '已执行' : '失败'));
+      scheduleRender(0);
+      return;
+    }
+    if (!globalThis.RFHost) { showOp(resultEl, '宿主运行时未加载——请刷新控制台'); return; }
     let res;
-    try { res = await chrome.tabs.sendMessage(tab.id, Object.assign({ cmd }, extra || {})); }
-    catch (e) { showOp(resultEl, '发送失败(页面可能刚打开, 稍后重试): ' + e.message); return; }
+    try { res = await RFHost.dispatch(cmd, extra || {}); }
+    catch (e) { showOp(resultEl, '执行失败: ' + ((e && e.message) || e)); return; }
     showOp(resultEl, (res && res.message) || (res && res.ok ? '已执行' : '失败'));
     scheduleRender(0);
   }
-  // 统一委托: 卡片与 Tab 内所有 data-taskop 按钮。
-  // 卡片按钮带业务前缀(fb-*/af-*), 映射到统一的任务消息; af-search 带 tag 转发(任意 x.com 标签页宿主)。
-  // 结果提示落点: 卡片内 → 全局 toast; 任务 Tab 内 → 该视图的 [data-opresult] span。
   document.addEventListener('click', (ev) => {
+    const openBtn = ev.target.closest('[data-ready-open]');
+    if (openBtn) {
+      chrome.tabs.create({ url: openBtn.dataset.readyOpen });
+      try { chrome.runtime.sendMessage({ cmd: 'identity-probe' }); } catch {}
+      setTimeout(scheduleRender, 2000);
+      return;
+    }
+    if (ev.target.closest('[data-ready-harvest]')) {
+      (async () => {
+        try { await chrome.runtime.sendMessage({ cmd: 'harvest-boost' }); } catch {}
+        showOp('toast', '供血已触发');
+        setTimeout(scheduleRender, 16000);
+      })();
+      return;
+    }
     const b = ev.target.closest('[data-taskop]');
     if (!b || b.disabled) return;
     const CMD_MAP = {
@@ -635,8 +671,8 @@
     const inCard = !!b.closest('.card');
     const scope = b.closest('.view');
     const rel = scope && scope.querySelector('[data-opresult]');
-    taskAction(cmd, findXTab, inCard || !rel ? 'toast' : rel,
-      '未找到 x.com 标签页——先打开任意 x.com 页面', isSearch ? { tag: afSearchTag } : undefined);
+    const resultId = inCard || !rel ? 'toast' : (rel.id || 'toast');
+    taskAction(cmd, resultId, isSearch ? { tag: afSearchTag } : undefined);
   });
 
   // ---------- 主导航(hash 记忆停留页) ----------
@@ -763,18 +799,13 @@
     $(id).addEventListener('change', scheduleSave);
   });
 
-  // ---------- 重置任务(回关 Tab): 优先经由页面; 页面不可达直接清 storage(此时任务必然未在运行) ----------
+  // ---------- 重置任务(回关 Tab): 控制台宿主直接清 storage ----------
   $('btn-reset').onclick = async () => {
     if (!confirm('确定重置任务? 当前账号的回关队列与进度将被清空。')) return;
-    const { rf_active: h } = await chrome.storage.local.get('rf_active');
-    if (!h) { showOp('op-result', '无活跃账号, 无任务可重置'); return; }
-    const tab = await findXTab();
-    let done = false;
-    if (tab) {
-      try { await chrome.tabs.sendMessage(tab.id, { cmd: 'reset-task' }); done = true; } catch {}
-    }
-    if (!done) await chrome.storage.local.set({ [`rf_task:${h}`]: null });
-    showOp('op-result', '已重置');
+    const res = globalThis.RFHost
+      ? await RFHost.dispatch('reset-task')
+      : { ok: false, message: '宿主未加载' };
+    showOp('op-result', (res && res.message) || (res && res.ok ? '已重置' : '重置失败'));
     render();
   };
 
@@ -877,6 +908,7 @@
 
   // ---------- 初始化 ----------
   initNav();
+  if (globalThis.RFHost) RFHost.boot();
   loadSettings().then(render);
   // storage 驱动: 任务写入/日志/tid 入库/供血进度都会触发重渲染, 无需轮询
   chrome.storage.onChanged.addListener((_c, area) => { if (area === 'local') scheduleRender(); });

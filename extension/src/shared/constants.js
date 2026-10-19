@@ -18,7 +18,11 @@ const RF = {
     afScanProgress: 'rf_af_scan_progress', // 主动关注手动连扫进度(面板展示用)
     active: 'rf_active', // 最近活跃账号(options/popup 无页面上下文时定位任务)
     loopWait: 'rf_loop_wait', // 循环等待状态落盘(限流重试/窗口用完): 控制台总览可见"系统在等, 不是死了"
+    consoleHost: 'rf_console_host', // 控制台宿主心跳(ADR-0010): { at }; 约 15s 内有更新视为在线
+    followTplSeen: 'rf_follow_tpl_seen', // 旁听到 create.json 的时刻(兑底材料就绪提示用)
   },
+  // 控制台心跳新鲜窗口(与领导权锁 15s 同量级)
+  CONSOLE_HOST_FRESH_MS: 15_000,
   // x.com 前端 JS 内置的公共 bearer(非用户专属, 多年未变, 开源生态普遍内置)。
   // 身份探针(ADR-0005)在收割到动态 bearer 之前兑底; 收割值始终优先。
   publicBearer: 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUro16cIUTA',

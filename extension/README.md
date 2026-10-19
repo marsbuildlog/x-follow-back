@@ -35,9 +35,10 @@ npm test        # 仓库根目录运行, 跑核心逻辑单元测试(node ≥ 18
 ## 工作原理
 
 生产者/消费者架构: 拉取器与回关循环解耦, 队列是唯一交界面。
+关注循环与抓取/连扫编排宿主为**常开控制台**(ADR-0010); x.com 用于材料旁听与兑底。
 
 ```
-x.com 标签页
+控制台(options) + x.com 旁听
 ├── page-hook.js   (MAIN world, 先于页面脚本)
 │     hook fetch/XHR → 捕获页面发出的请求(含全部请求头):
 │       GraphQL (/i/api/graphql/...) 按操作名登记, v1.1 REST (/i/api/1.1/...) 按路径登记

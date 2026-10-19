@@ -1,4 +1,4 @@
-// MV3 service worker: 长任务不在这里跑, 全部在 x.com 标签页的 content script 内执行。
+// MV3 service worker: 长任务不在这里跑(ADR-0010: 循环宿主=常开控制台 options; 不搬进 SW)。
 // 职责:
 //   0. tid 收割池(ADR-0004): 旁听 x.com 页面自己的 API 请求头, 收集页面产生的
 //      x-client-transaction-id 入 rf_tid_pool(带路径标签), 重放侧按路径取用轮换;
@@ -8,6 +8,7 @@
 //       其余 x.com 页不刷, 避免丢失页面内状态如草稿)
 //   2. 代理系统通知(chrome.notifications 仅扩展页面可用, content script 无权调用)
 //   4. 身份探针(ADR-0005): 免输入识别登录账号, ct0+公共 bearer → settings.json → rf_active
+//   5. 控制台宿主端口(ADR-0010): options connect 保活; 断开时可通知(心跳以 storage 为准)
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg) return;
@@ -189,18 +190,19 @@ chrome.cookies.onChanged.addListener((info) => {
   }
 });
 
-// 最后一个 x.com 标签页被关闭且任务在跑 → 通知用户任务已暂停
-// (任务跑在标签页内, 页面关了循环就停了; 重开页面会自动接管继续)
+// 最后一个 x.com 关掉: ADR-0010 后循环在控制台, 一般不停。仅当控制台心跳也已冷(兼容兜底宿主)才提醒。
 chrome.tabs.onRemoved.addListener(async () => {
   try {
     const tabs = await chrome.tabs.query({ url: 'https://x.com/*' });
     if (tabs.length) return;
-    const { rf_active: h } = await chrome.storage.local.get('rf_active');
+    const { rf_active: h, rf_console_host: ch, rf_task: _ignore } = await chrome.storage.local.get(['rf_active', 'rf_console_host']);
     if (!h) return;
+    const fresh = (globalThis.RF && RF.CONSOLE_HOST_FRESH_MS) || 15_000;
+    if (ch && Date.now() - (ch.at || 0) < fresh) return; // 控制台仍在线, 循环继续
     const key = 'rf_task:' + h;
     const { [key]: t } = await chrome.storage.local.get(key);
     if (t && t.state === 'running') {
-      notify('tab-closed', 'XFollowBack 已暂停', 'x.com 页面已关闭, 自动回关已停止; 重新打开认证粉丝页会自动继续');
+      notify('tab-closed', 'XFollowBack 提示', 'x.com 已全部关闭且控制台离线——打开控制台可继续回关');
     }
   } catch {}
 });
@@ -372,6 +374,10 @@ chrome.webRequest.onSendHeaders.addListener(
           if (old !== auth.value) chrome.storage.local.set({ [RF.KEY.bearer]: auth.value });
         }).catch(() => {});
       }
+      // 旁听到回关 REST → 记兑底材料就绪(控制台就绪清单用; 不依赖 page-hook)
+      if (path === '/i/api/1.1/friendships/create.json') {
+        chrome.storage.local.set({ [RF.KEY.followTplSeen]: Date.now() }).catch(() => {});
+      }
       // tid 只收 Route 1 会用的路径(挡 timeline / avatar_content / viewer_context 等噪声)
       if (!globalThis.RFTidPool.shouldHarvest(path)) return;
       // 写入串行化: 写进行中时丢弃本次(同页面批量请求会重复触发, 页面持续产 tid, 丢一两条无妨)
@@ -386,6 +392,19 @@ chrome.webRequest.onSendHeaders.addListener(
   { urls: ['https://x.com/i/api/*'] },
   ['requestHeaders']
 );
+
+// 控制台宿主端口: 断开时若无其它控制台连接, 发一次「请保持控制台打开」通知(循环靠心跳自行停)
+let consolePorts = 0;
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'console-host') return;
+  consolePorts++;
+  port.onDisconnect.addListener(() => {
+    consolePorts = Math.max(0, consolePorts - 1);
+    if (consolePorts === 0) {
+      notify('console-host-gone', 'XFollowBack 控制台已关闭', '关注循环已离开宿主——重新打开控制台即可继续');
+    }
+  });
+});
 
 // 热升级后清一次池内噪声(timeline 等旧条目), 避免占满白名单名额
 chrome.storage.local.get(TID_KEY).then(({ [TID_KEY]: pool }) => {

@@ -58,4 +58,5 @@
   自动供血小窗只收 SearchTimeline 路径, 粉丝路径靠页面在场自然供血(回关循环本就要求页面开着)
 - 回关动作 friendships/create.json Route 1 已切生产(2026-10-19 Phase 2): background 直连
   (bearer+csrf, tid 拒收时再试池内跨路径 tid), 仅传输失败兑底页面重放; 业务响应不重放防双关。
-  关注循环仍宿主在 x.com 标签页(不搬进 SW——长任务/限流等待与 ADR-0006 同论)。
+  关注循环**不搬进 SW**(长任务/限流等待与 ADR-0006 同论); 宿主已迁到常开控制台(ADR-0010),
+  x.com 仅供血/兑底/ADR-0007。

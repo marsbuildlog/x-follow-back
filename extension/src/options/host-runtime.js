@@ -1,0 +1,893 @@
+// 控制台宿主运行时(ADR-0010): 关注循环 + 抓取/连扫编排跑在 options 页。
+// 依赖: constants / logic / tidpool / route1 已挂 globalThis; 由 options.html 先于本文件加载。
+(() => {
+  'use strict';
+  const RF = globalThis.RF;
+  const L = globalThis.XFollowBackLogic;
+  if (!RF || !L) {
+    console.error('[XFollowBack] host-runtime 依赖未挂载');
+    return;
+  }
+  const K = RF.KEY;
+  const AF = RF.AF;
+  const OP_FOLLOWERS = 'BlueVerifiedFollowers';
+  const OP_SEARCH = 'SearchTimeline';
+  const OP_TWEET_DETAIL = 'TweetDetail';
+  const FOLLOW_API = '/i/api/1.1/friendships/create.json';
+
+  const {
+    parseFollowers, interpret, mergeUsers, findPendingItem, evaluateStall, rolloverDaily, atName,
+    rateLimitBackoffMs, windowExhaustedWaitMs, parseSearchTimeline, parseTweetDetail, afEligible,
+    pickNextItem, mergeAfCandidates, upsertPosts, duePost, duePostAcrossTags, markScanned,
+    nextAutoSearchTag, shouldAutoSearch,
+  } = L;
+
+  const store = {
+    async get(k, d) {
+      try {
+        const r = await chrome.storage.local.get(k);
+        return k in r ? r[k] : d;
+      } catch { return d; }
+    },
+    async set(k, v) {
+      try { await chrome.storage.local.set({ [k]: v }); return true; } catch { return false; }
+    },
+  };
+
+  const taskKey = (h) => `${K.task}:${h}`;
+  const dailyKey = (h) => `${K.daily}:${h}`;
+  const afTaskKey = (h) => `${K.afTask}:${h}`;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const randInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+
+  async function log(text) {
+    const arr = (await store.get(K.log, [])) || [];
+    arr.push({ ts: Date.now(), text: String(text).slice(0, 500) });
+    while (arr.length > 200) arr.shift();
+    await store.set(K.log, arr);
+  }
+  async function getSettings() {
+    return { ...RF.DEFAULTS, ...((await store.get(K.settings, {})) || {}) };
+  }
+  function newTask(handle) {
+    return {
+      state: 'idle', pauseReason: null, nextAutoResumeAt: null,
+      screenName: handle, queue: [], consecutiveFailures: [],
+      lastError: null, lastFetchAt: null, updatedAt: 0,
+    };
+  }
+  function newAfTask(handle) {
+    return {
+      state: 'idle', pauseReason: null, nextAutoResumeAt: null,
+      screenName: handle, queue: [], tags: {}, consecutiveFailures: [],
+      lastError: null, updatedAt: 0,
+    };
+  }
+  async function getTask(handle) {
+    if (!handle) return newTask('');
+    return (await store.get(taskKey(handle), null)) || newTask(handle);
+  }
+  async function saveTask(handle, t) {
+    t.screenName = handle; t.updatedAt = Date.now();
+    await store.set(taskKey(handle), t);
+  }
+  async function getAfTask(handle) {
+    if (!handle) return newAfTask('');
+    return (await store.get(afTaskKey(handle), null)) || newAfTask(handle);
+  }
+  async function saveAfTask(handle, t) {
+    t.screenName = handle; t.updatedAt = Date.now();
+    await store.set(afTaskKey(handle), t);
+  }
+  async function getDaily(handle) {
+    return rolloverDaily(await store.get(dailyKey(handle), null));
+  }
+  async function setActive(handle) {
+    if (handle) await store.set(K.active, handle);
+  }
+  async function activeHandle() {
+    return runningHandle || (await store.get(K.active, null)) || '';
+  }
+
+  function sendBg(payload) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(payload, (r) => {
+          if (chrome.runtime.lastError) return resolve({ error: 'background 无响应: ' + chrome.runtime.lastError.message });
+          resolve(r || { error: 'background 空应答' });
+        });
+      } catch (e) { resolve({ error: String((e && e.message) || e) }); }
+    });
+  }
+
+  async function findXTab() {
+    try {
+      const tabs = await chrome.tabs.query({ url: 'https://x.com/*' });
+      if (!tabs.length) return null;
+      return tabs.find((t) => /\/verified_followers/.test(t.url || '')) || tabs[0];
+    } catch { return null; }
+  }
+
+  // 兑底: 让某 x.com 页重放 create.json
+  async function pageReplayFollow(userId) {
+    const tab = await findXTab();
+    if (!tab) return { error: '无 x.com 标签页可兑底重放——请打开认证粉丝页并点一次回关刷模板' };
+    try {
+      return await chrome.tabs.sendMessage(tab.id, { cmd: 'page-replay-follow', userId: String(userId) });
+    } catch (e) {
+      return { error: '页面重放失败: ' + ((e && e.message) || e) };
+    }
+  }
+
+  async function followUser(userId) {
+    const uid = String(userId);
+    const r1 = await sendBg({ cmd: 'route1-follow', userId: uid });
+    if (r1 && r1.status != null && !r1.transport) {
+      return { status: r1.status, ok: !!r1.ok, body: r1.body || '', rl: r1.rl || {}, via: r1.via || 'route1' };
+    }
+    const res = await pageReplayFollow(uid);
+    if (res && res.status != null) return Object.assign({}, res, { via: 'page' });
+    const why = (r1 && r1.error) ? `Route 1 失败(${r1.error}); ` : '';
+    throw new Error(why + ((res && res.error) || '页面重放不可用'));
+  }
+
+  // ---------- 领导权锁(控制台优先 token 前缀 console-) ----------
+  let myLockToken = null;
+  async function acquireLock() {
+    const lock = await store.get(K.lock, null);
+    const now = Date.now();
+    const fresh = lock && now - lock.ts < 15_000;
+    if (fresh && lock.token !== myLockToken) return false;
+    myLockToken = myLockToken || ('console-' + Math.random().toString(36).slice(2));
+    await store.set(K.lock, { token: myLockToken, ts: now });
+    return true;
+  }
+  async function refreshLock() {
+    if (myLockToken) await store.set(K.lock, { token: myLockToken, ts: Date.now() });
+  }
+  async function isLockMine() {
+    const lock = await store.get(K.lock, null);
+    return !!lock && lock.token === myLockToken;
+  }
+
+  async function sleepSegments(ms) {
+    const deadline = Date.now() + ms;
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return true;
+      await sleep(Math.min(remaining, 30_000));
+    }
+  }
+  async function sleepInterruptible(ms, handle) {
+    const deadline = Date.now() + ms;
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return true;
+      await sleep(Math.min(remaining, 30_000));
+      const fb = await store.get(taskKey(handle), null);
+      const af = await store.get(afTaskKey(handle), null);
+      if ((!fb || fb.state !== 'running') && (!af || af.state !== 'running')) return false;
+      if (!(await isLockMine())) return false;
+    }
+  }
+
+  // ---------- 搜索 / 详情(Route 1 only) ----------
+  let lastSearchFireAt = 0;
+  let lastSearchOkAt = 0;
+  let afSearching = false;
+  let afScanning = false;
+  let afBurstScanning = false;
+  let fetchingFollowers = false;
+  let fetchingDiff = false;
+
+  async function hasGqlTpl(op) {
+    try {
+      const { [K.gqlTpl + ':' + op]: tpl } = await chrome.storage.local.get(K.gqlTpl + ':' + op);
+      return !!(tpl && tpl.p && tpl.q && tpl.v0);
+    } catch { return false; }
+  }
+  async function awaitSearchGap(label) {
+    const sinceFire = Date.now() - lastSearchFireAt;
+    if (sinceFire < AF.SEARCH_MIN_GAP_MS) {
+      const waitMs = AF.SEARCH_MIN_GAP_MS - sinceFire;
+      await log(`${label}节奏控制, 等${Math.ceil(waitMs / 1000)}秒`);
+      if (afBurstScanning) {
+        try {
+          const cur = await store.get(K.afScanProgress, null);
+          if (cur && cur.running) await store.set(K.afScanProgress, Object.assign({}, cur, { updatedAt: Date.now() }));
+        } catch {}
+      }
+      await sleepSegments(waitMs);
+    }
+    lastSearchFireAt = Date.now();
+  }
+
+  async function searchPage(rawQuery, cursor) {
+    let retries = 0;
+    while (true) {
+      await awaitSearchGap('搜索');
+      let res = await sendBg({
+        cmd: 'route1-graphql', op: OP_SEARCH,
+        vars: { rawQuery, count: AF.SEARCH_PAGE_SIZE, cursor: cursor || null },
+      });
+      if (res && res.error) return { error: res.error + '——打开互关标签页旁听 SearchTimeline 或点手动供血' };
+      if (res.status === 429) {
+        if (++retries > 3) return { rateLimitedOut: true };
+        const backoff = rateLimitBackoffMs(interpret(res), Date.now(), 15 * 60_000);
+        await log(`搜索限流, ${Math.round(backoff / 1000)}秒后重试`);
+        await sleepSegments(backoff);
+        continue;
+      }
+      if (res.ok) lastSearchOkAt = Date.now();
+      const parsed = parseSearchTimeline(res.body || '');
+      if (parsed.error) {
+        parsed.error = `HTTP ${res.status}: ` + parsed.error;
+        if (res.status === 404 && ++retries <= 3) {
+          await log(`Route 1 404(疑似 tid), 换 tid 重试(${retries}/3)`);
+          continue;
+        }
+        return parsed;
+      }
+      return parsed;
+    }
+  }
+
+  async function tweetDetailPage(postId, cursor) {
+    let retries = 0;
+    while (true) {
+      await awaitSearchGap('详情');
+      const res = await sendBg({
+        cmd: 'route1-graphql', op: OP_TWEET_DETAIL,
+        vars: { focalTweetId: String(postId), cursor: cursor || null },
+      });
+      if (res && res.error) return { error: res.error };
+      if (res.status === 429) {
+        if (++retries > 3) return { rateLimitedOut: true };
+        const backoff = rateLimitBackoffMs(interpret(res), Date.now(), 15 * 60_000);
+        await log(`详情限流, ${Math.round(backoff / 1000)}秒后重试`);
+        await sleepSegments(backoff);
+        continue;
+      }
+      if (res.ok) lastSearchOkAt = Date.now();
+      const parsed = parseTweetDetail(res.body || '');
+      if (parsed.error) {
+        parsed.error = `HTTP ${res.status}: ` + parsed.error;
+        if (res.status === 404 && ++retries <= 3) {
+          await log(`详情 Route 1 404(疑似 tid), 换 tid 重试(${retries}/3)`);
+          continue;
+        }
+        return parsed;
+      }
+      return parsed;
+    }
+  }
+
+  function eligibleFromItems(items, tag) {
+    const users = [];
+    const stats = { total: 0, retweet: 0, notBlue: 0, protected: 0, already: 0, ratio: 0 };
+    for (const it of items || []) {
+      if (it.isRetweet) { stats.retweet++; continue; }
+      stats.total++;
+      const el = afEligible(it.user, AF.RATIO_MAX);
+      if (!el.ok) {
+        if (el.reason === 'not-blue') stats.notBlue++;
+        else if (el.reason === 'protected') stats.protected++;
+        else if (el.reason === 'already-following') stats.already++;
+        else if (el.reason === 'ratio') stats.ratio++;
+        continue;
+      }
+      users.push({ userId: it.user.userId, screenName: it.user.screenName, name: it.user.name, source: tag });
+    }
+    return { users, stats };
+  }
+
+  async function enqueueAfCandidates(handle, users, tag) {
+    if (!users.length) return { added: 0, capped: false };
+    const fb = await getTask(handle);
+    const exclude = new Set(fb.queue.map((q) => q.userId));
+    const t = await getAfTask(handle);
+    const { added, capped } = mergeAfCandidates(t, users, exclude, AF.QUEUE_CAP);
+    if (capped) {
+      t.lastError = `主动关注队列已达上限(${AF.QUEUE_CAP}), 暂停入队`;
+      await log(`⚠ ${t.lastError}`);
+    }
+    await saveAfTask(handle, t);
+    if (t.state === 'done' && t.queue.some((q) => q.status === 'pending')) {
+      t.state = 'running';
+      t.pauseReason = null;
+      t.nextAutoResumeAt = null;
+      await saveAfTask(handle, t);
+      await log('检测到新待关注, 主动关注自动续跑');
+      runLoop(handle);
+    }
+    return { added, capped };
+  }
+
+  async function runAfSearch(tag, handle) {
+    if (afSearching) return { ok: false, message: '已在搜索中' };
+    if (!handle) return { ok: false, message: '未识别到登录账号——请先完成身份识别' };
+    afSearching = true;
+    let done = null;
+    try {
+      await setActive(handle);
+      {
+        const t = await getAfTask(handle);
+        t.lastAutoSearchAt = Date.now();
+        t.lastAutoSearchTag = tag;
+        await saveAfTask(handle, t);
+      }
+      await store.set(K.afProgress, { tag, page: 0, maxPages: AF.SEARCH_MAX_PAGES, posts: 0, running: true, updatedAt: Date.now() });
+      await log(`抓取互关帖发车(控制台宿主): #${tag}, 最多${AF.SEARCH_MAX_PAGES}页`);
+      const rawQuery = '#' + tag;
+      let cursor = null;
+      const postIds = [];
+      const authorItems = [];
+      for (let page = 0; page < AF.SEARCH_MAX_PAGES; page++) {
+        const out = await searchPage(rawQuery, cursor);
+        if (out.error) { await log(`搜索失败: ${out.error}`); done = { tag, page, maxPages: AF.SEARCH_MAX_PAGES, posts: postIds.length, running: false, error: out.error, finishedAt: Date.now(), updatedAt: Date.now() }; break; }
+        if (out.rateLimitedOut) { done = { tag, page, maxPages: AF.SEARCH_MAX_PAGES, posts: postIds.length, running: false, rateLimited: true, finishedAt: Date.now(), updatedAt: Date.now() }; break; }
+        const nonRtItems = [];
+        for (const it of out.items || []) {
+          if (it.postId) postIds.push({ postId: it.postId, replyCount: it.replyCount });
+          if (!it.isRetweet) nonRtItems.push(it);
+        }
+        authorItems.push(...nonRtItems);
+        await store.set(K.afProgress, { tag, page: page + 1, maxPages: AF.SEARCH_MAX_PAGES, posts: postIds.length, running: true, updatedAt: Date.now() });
+        await log(`搜索第${page + 1}页: 累计帖子${postIds.length}, cursor=${out.cursor ? '有' : '无'}`);
+        if (!out.cursor || out.cursor === cursor || out.items.length === 0) break;
+        cursor = out.cursor;
+      }
+      const t1 = await getAfTask(handle);
+      const bucket = (t1.tags[tag] = t1.tags[tag] || { posts: [] });
+      upsertPosts(bucket.posts, postIds, Date.now());
+      await saveAfTask(handle, t1);
+      const { users } = eligibleFromItems(authorItems, tag);
+      const { added } = await enqueueAfCandidates(handle, users, tag);
+      await log(`抓取完成 #${tag}: 帖子${postIds.length}, 作者候选+${added}`);
+      if (!done) done = { tag, page: AF.SEARCH_MAX_PAGES, maxPages: AF.SEARCH_MAX_PAGES, posts: postIds.length, running: false, finishedAt: Date.now(), updatedAt: Date.now() };
+      return { ok: true, message: `抓取完成: 帖${postIds.length}, 候选+${added}` };
+    } catch (e) {
+      await log(`抓取异常: ${e}`);
+      done = { tag, running: false, error: String(e), finishedAt: Date.now(), updatedAt: Date.now() };
+      return { ok: false, message: String(e) };
+    } finally {
+      afSearching = false;
+      if (done) await store.set(K.afProgress, done).catch(() => {});
+      else await store.set(K.afProgress, { running: false, finishedAt: Date.now(), updatedAt: Date.now() }).catch(() => {});
+    }
+  }
+
+  async function runAfScanOne(tag, handle) {
+    if (afScanning || afSearching) return { skipped: true };
+    afScanning = true;
+    try {
+      const t0 = await getAfTask(handle);
+      const post = duePost((t0.tags[tag] && t0.tags[tag].posts) || [], Date.now(), AF.SCAN_MAX);
+      if (!post) return { skipped: true };
+      const postId = post.postId;
+      let page = 0, cursor = null, limited = false, transportErr = null;
+      const allItems = [];
+      let mode = (await hasGqlTpl(OP_TWEET_DETAIL)) ? 'detail' : 'search';
+      if (mode === 'search') {
+        await log(`扫描帖子 ${postId}: 未旁听 TweetDetail 模板, 兑底 conversation_id 搜索`);
+      }
+      while (page < AF.SCAN_MAX_PAGES) {
+        const out = mode === 'detail'
+          ? await tweetDetailPage(postId, cursor)
+          : await searchPage(`conversation_id:${postId}`, cursor);
+        if (out.error) {
+          if (mode === 'detail' && page === 0) {
+            await log(`扫描帖子 ${postId}: 详情首屏失败(${out.error}), 兑底 conversation_id 搜索`);
+            mode = 'search'; cursor = null; continue;
+          }
+          transportErr = out.error;
+          await log(`扫描帖子 ${postId} 失败: ${out.error}`);
+          break;
+        }
+        if (out.rateLimitedOut) { limited = true; break; }
+        allItems.push(...out.items);
+        if (!out.cursor || out.cursor === cursor || out.items.length === 0) break;
+        cursor = out.cursor;
+        page++;
+        await sleep(800 + Math.random() * 700);
+      }
+      const t1 = await getAfTask(handle);
+      const post1 = ((t1.tags[tag] = t1.tags[tag] || { posts: [] }).posts || []).find((p) => p.postId === postId);
+      let scanNo = post1 ? post1.scanCount + 1 : 1;
+      if (post1) {
+        if (transportErr) post1.nextScanAt = Date.now() + AF.SCAN_ERR_RETRY_MS;
+        else if (limited) post1.nextScanAt = Date.now() + AF.SCAN_RETRY_MS;
+        else markScanned(post1, Date.now(), AF.SCAN_INTERVAL_MS);
+        await saveAfTask(handle, t1);
+        scanNo = post1.scanCount;
+      }
+      const { users } = eligibleFromItems(allItems, tag);
+      const { added } = await enqueueAfCandidates(handle, users, tag);
+      const pathLabel = mode === 'detail' ? '详情' : '搜索';
+      await log(`扫描帖子 ${postId}(第${scanNo}/${AF.SCAN_MAX}次, ${pathLabel}${page + 1}页, 解析${allItems.length}条): 候选+${added}`);
+      return { added };
+    } catch (e) {
+      await log(`扫描异常: ${e}`);
+      return { transportErr: String(e) };
+    } finally {
+      afScanning = false;
+    }
+  }
+
+  async function runAfScanBurst(handle) {
+    if (!handle) return { ok: false, message: '未识别到登录账号——请先完成身份识别' };
+    if (afBurstScanning) return { ok: false, message: '已在连扫中' };
+    if (afSearching) return { ok: false, message: '正在抓取互关帖, 等本轮跑完再连扫' };
+    afBurstScanning = true;
+    const startedAt = Date.now();
+    await store.set(K.afScanProgress, {
+      running: true, startedAt, updatedAt: startedAt, scanned: 0, added: 0, target: AF.MANUAL_SCAN_TARGET,
+    });
+    (async () => {
+      let scanned = 0, added = 0;
+      try {
+        await log(`连扫发车(控制台宿主): 补待关注到 ${AF.MANUAL_SCAN_TARGET}`);
+        while (true) {
+          const t = await getAfTask(handle);
+          const pending = (t.queue || []).filter((q) => q.status === 'pending').length;
+          if (pending >= AF.MANUAL_SCAN_TARGET) {
+            await store.set(K.afScanProgress, {
+              running: false, finishedAt: Date.now(), updatedAt: Date.now(),
+              scanned, added, pending, stopReason: '已达目标', target: AF.MANUAL_SCAN_TARGET,
+            });
+            await log(`连扫结束: 待关注${pending}≥${AF.MANUAL_SCAN_TARGET}, 扫${scanned}帖, 候选+${added}`);
+            break;
+          }
+          const due = duePostAcrossTags(t.tags, Date.now(), AF.SCAN_MAX);
+          if (!due) {
+            await store.set(K.afScanProgress, {
+              running: false, finishedAt: Date.now(), updatedAt: Date.now(),
+              scanned, added, pending, stopReason: '无到期帖', target: AF.MANUAL_SCAN_TARGET,
+            });
+            await log(`连扫结束: 无到期帖, 待关注${pending}, 扫${scanned}帖, 候选+${added}`);
+            break;
+          }
+          await store.set(K.afScanProgress, {
+            running: true, startedAt, updatedAt: Date.now(), scanned, added, pending,
+            currentPostId: due.post.postId, tag: due.tag, target: AF.MANUAL_SCAN_TARGET,
+          });
+          const r = await runAfScanOne(due.tag, handle);
+          if (r && !r.skipped) {
+            scanned++;
+            added += (r.added || 0);
+          } else if (r && r.skipped) {
+            await sleep(500);
+          }
+        }
+      } catch (e) {
+        await log(`连扫异常: ${e}`);
+        await store.set(K.afScanProgress, {
+          running: false, finishedAt: Date.now(), updatedAt: Date.now(),
+          scanned, added, error: String(e), target: AF.MANUAL_SCAN_TARGET,
+        });
+      } finally {
+        afBurstScanning = false;
+      }
+    })();
+    return { ok: true, message: '连扫已发车——进度见控制台状态行与日志' };
+  }
+
+  // ---------- 拉粉(Route 1) ----------
+  async function runFetch(screenName) {
+    if (fetchingFollowers) return { ok: false, message: '已在拉取中' };
+    fetchingFollowers = true;
+    try {
+      await store.set(K.fetchProgress, { running: true, page: 0, screenName, updatedAt: Date.now() });
+      let cursor = null;
+      let page = 0;
+      const MAX_PAGES = 8;
+      const count = 20;
+      const all = [];
+      while (page < MAX_PAGES) {
+        const res = await sendBg({
+          cmd: 'route1-graphql', op: OP_FOLLOWERS,
+          vars: { count, screen_name: null, cursor: cursor || null },
+        });
+        if (res && res.error) {
+          await log(`拉粉 Route 1 不可用(${res.error})——请打开认证粉丝页旁听模板`);
+          return { ok: false, message: res.error };
+        }
+        if (res.status === 429) {
+          const backoff = rateLimitBackoffMs(interpret(res), Date.now(), 15 * 60_000);
+          await log(`拉粉限流, ${Math.round(backoff / 1000)}秒后重试`);
+          await sleepSegments(backoff);
+          continue;
+        }
+        const parsed = parseFollowers(res.body || '');
+        if (parsed.error) {
+          await log(`拉粉解析失败: ${parsed.error}`);
+          return { ok: false, message: parsed.error };
+        }
+        all.push(...(parsed.users || []));
+        page++;
+        await store.set(K.fetchProgress, { running: true, page, screenName, count: all.length, updatedAt: Date.now() });
+        if (!parsed.cursor || parsed.cursor === cursor) break;
+        cursor = parsed.cursor;
+        await sleep(1200 + Math.random() * 800);
+      }
+      const t = await getTask(screenName);
+      const added = mergeUsers(t, all);
+      t.lastFetchAt = Date.now();
+      await saveTask(screenName, t);
+      if (t.state === 'done' && t.queue.some((q) => q.status === 'pending')) {
+        t.state = 'running';
+        await saveTask(screenName, t);
+        await log('拉到新粉, 回关自动续跑');
+        runLoop(screenName);
+      }
+      await log(`拉取完成: 本轮${all.length}人, 新入队${added}`);
+      return { ok: true, message: `拉取完成: +${added}` };
+    } catch (e) {
+      await log(`拉取异常: ${e}`);
+      return { ok: false, message: String(e) };
+    } finally {
+      fetchingFollowers = false;
+      await store.set(K.fetchProgress, { running: false, finishedAt: Date.now(), updatedAt: Date.now() }).catch(() => {});
+    }
+  }
+
+  // ---------- 暂停 / 恢复 / 循环 ----------
+  let runningHandle = null;
+  let loopRunning = false;
+  let loopWait = null;
+
+  const PAUSE_ALERTS = {
+    'template-expired': '回关模板已过期: 请在认证粉丝列表点一次「回关」, 然后点「恢复」',
+    'daily-limit': '关注数已达上限(X 按 24 小时滚动窗口重置), 每小时自动探测重试',
+    'stalled': '连续失败超过阈值, 稍后自动恢复',
+    'error': '连续请求异常, 稍后自动恢复',
+  };
+  function notifyPause(reason) {
+    try {
+      const p = chrome.runtime.sendMessage({
+        cmd: 'notify', tag: 'pause-' + reason, title: 'XFollowBack 已暂停',
+        message: PAUSE_ALERTS[reason] || reason,
+      });
+      if (p && p.catch) p.catch(() => {});
+    } catch {}
+  }
+  async function setLoopWait(v) {
+    loopWait = v;
+    await store.set(K.loopWait, v || null).catch(() => {});
+  }
+  async function pauseTask(handle, reason, resumeAt) {
+    for (const [get, save] of [[getTask, saveTask], [getAfTask, saveAfTask]]) {
+      const t = await get(handle);
+      if (t.state !== 'running') continue;
+      t.state = 'paused';
+      t.pauseReason = reason;
+      t.nextAutoResumeAt = resumeAt || null;
+      await save(handle, t);
+    }
+    await log(`任务暂停(${reason})`);
+    if (reason !== 'manual') notifyPause(reason);
+  }
+  async function resumeTask(handle) {
+    let resumed = false;
+    for (const [get, save] of [[getTask, saveTask], [getAfTask, saveAfTask]]) {
+      const t = await get(handle);
+      if (t.state !== 'paused') continue;
+      for (const item of t.queue) {
+        if (item.status === 'failed') { item.status = 'pending'; item.error = null; }
+      }
+      t.state = 'running';
+      t.pauseReason = null;
+      t.nextAutoResumeAt = null;
+      await save(handle, t);
+      resumed = true;
+    }
+    if (!resumed) return getTask(handle);
+    await log('任务恢复');
+    runLoop(handle);
+    return getTask(handle);
+  }
+
+  async function startTask(screenName) {
+    if (!screenName) return { ok: false, message: '缺少账号——请先完成身份识别' };
+    const t0 = await getTask(screenName);
+    if (t0.state === 'running') return { ok: false, message: '回关任务已在运行' };
+    if (runningHandle) {
+      t0.state = 'running'; t0.pauseReason = null; t0.nextAutoResumeAt = null; t0.lastError = null;
+      await saveTask(screenName, t0);
+      await setActive(screenName);
+      await log('回关已登记运行(循环醒来后按回关优先接续)');
+      return { ok: true, message: '已登记运行——循环醒来后自动接续(当前在限流等待)' };
+    }
+    const t = t0;
+    const pendingCount = t.queue.filter((q) => q.status === 'pending').length;
+    t.state = 'running'; t.pauseReason = null; t.nextAutoResumeAt = null; t.lastError = null;
+    await saveTask(screenName, t);
+    await setActive(screenName);
+    await log(`任务启动: 总数${t.queue.length}, 待回关${pendingCount}`);
+    if (pendingCount === 0 && !fetchingFollowers) runFetch(screenName);
+    runLoop(screenName);
+    return {
+      ok: true,
+      message: `总数${t.queue.length}, 待回关${pendingCount}` + (pendingCount === 0 ? '(已触发拉取, 拉到后自动续跑)' : ''),
+      total: t.queue.length,
+    };
+  }
+
+  async function startAfTask(handle) {
+    if (!handle) return { ok: false, message: '未识别到登录账号——请先完成身份识别' };
+    const t0 = await getAfTask(handle);
+    if (t0.state === 'running') return { ok: false, message: '主动关注任务已在运行' };
+    if (runningHandle) {
+      t0.state = 'running'; t0.pauseReason = null; t0.nextAutoResumeAt = null; t0.lastError = null;
+      await saveAfTask(handle, t0);
+      await setActive(handle);
+      await log('主动关注已登记运行(循环醒来后按回关优先接续)');
+      return { ok: true, message: '已登记运行——循环醒来后自动接续(当前在限流等待)' };
+    }
+    const t = await getAfTask(handle);
+    const pending = t.queue.filter((q) => q.status === 'pending').length;
+    t.state = 'running'; t.pauseReason = null; t.nextAutoResumeAt = null; t.lastError = null;
+    await saveAfTask(handle, t);
+    await setActive(handle);
+    await log(`主动关注启动: 待关注${pending}`);
+    runLoop(handle);
+    return { ok: true, message: pending > 0 ? `待关注${pending}, 已开始` : '队列暂空——先点「抓取互关帖」, 扫到人会自动开跑' };
+  }
+
+  async function runLoop(handle) {
+    if (loopRunning || !handle) return;
+    if (!(await acquireLock())) return;
+    loopRunning = true;
+    runningHandle = handle;
+    await setLoopWait(null);
+    const io = {
+      fb: { get: getTask, save: saveTask },
+      af: { get: getAfTask, save: saveAfTask },
+    };
+    try {
+      let rateRetryUserId = null;
+      let rateRetryCount = 0;
+      let errorStreak = 0;
+      while (true) {
+        await refreshLock();
+        {
+          const afNow = await io.af.get(handle);
+          if (afNow.state === 'running') {
+            const pend = afNow.queue.filter((i) => i.status === 'pending').length;
+            if (pend < AF.PENDING_TARGET) {
+              const due = duePostAcrossTags(afNow.tags, Date.now(), AF.SCAN_MAX);
+              if (due) await runAfScanOne(due.tag, handle);
+            }
+          }
+        }
+        let src, task, item;
+        {
+          const fb = await io.fb.get(handle);
+          const af = await io.af.get(handle);
+          if (fb.state !== 'running' && af.state !== 'running') break;
+          const picked = pickNextItem(fb, af);
+          if (!picked) {
+            let changed = false;
+            if (fb.state === 'running' && !fb.queue.some((i) => i.status === 'pending')) { fb.state = 'done'; changed = true; }
+            if (af.state === 'running' && !af.queue.some((i) => i.status === 'pending')) { af.state = 'done'; changed = true; }
+            if (changed) {
+              await io.fb.save(handle, fb); await io.af.save(handle, af);
+              await log('队列已空: 回关等待新粉(拉到后自动续跑), 主动关注已清空(扫到新人后自动续跑)');
+            }
+            break;
+          }
+          src = picked.src;
+          task = src === 'fb' ? fb : af;
+          item = picked.item;
+        }
+        const settings = await getSettings();
+        const delayMs = randInt(settings.intervalMin, settings.intervalMax) * 1000;
+        if (!(await sleepInterruptible(delayMs, handle))) break;
+        task = await io[src].get(handle);
+        if (task.state !== 'running') break;
+        if (!(await isLockMine())) break;
+        const current = findPendingItem(task.queue, item.userId);
+        if (!current) continue;
+        let res;
+        try {
+          res = await followUser(current.userId);
+        } catch (e) {
+          errorStreak++;
+          await log(`关注请求异常(${errorStreak}/2) ${atName(current)}: ${e}`);
+          if (errorStreak >= 2) {
+            await pauseTask(handle, 'error', Date.now() + settings.autoResumeMin * 60_000);
+            break;
+          }
+          await sleep(5_000);
+          continue;
+        }
+        const r = interpret(res);
+        errorStreak = 0;
+        if (r.ok) {
+          rateRetryUserId = null;
+          current.status = 'done';
+          current.doneAt = Date.now();
+          current.error = null;
+          task.consecutiveFailures = [];
+          await io[src].save(handle, task);
+          const d = await getDaily(handle);
+          d.followed++;
+          await store.set(dailyKey(handle), d);
+          await log(`已关注 ${atName(current)}${src === 'af' ? '(主动)' : ''}${res.via === 'page' ? '(页面重放)' : '(Route 1)'}, 今日 ${d.followed}`);
+          const pw = windowExhaustedWaitMs(r, Date.now());
+          if (pw > 0) {
+            await setLoopWait({ until: Date.now() + pw, text: '窗口次数用完' });
+            await log(`本窗口次数已用完(remaining=0), ${Math.round(pw / 1000)}秒后窗口重置自动继续`);
+            if (!(await sleepInterruptible(pw, handle))) break;
+            await setLoopWait(null);
+          }
+        } else if (r.rateLimited) {
+          if (rateRetryUserId !== item.userId) { rateRetryUserId = item.userId; rateRetryCount = 1; }
+          else rateRetryCount++;
+          const coolMs = Math.max(0, Math.min(10, settings.humanCooldownMin ?? 1)) * 60_000;
+          const backoff = rateLimitBackoffMs(r, Date.now(), settings.rateLimitBackoffMin * 60_000, 5000, coolMs);
+          if (rateRetryCount > 3) {
+            current.status = 'failed';
+            current.error = `连续限流 ${rateRetryCount} 次: ${r.errorText}`;
+            task.lastError = `${atName(current)}: ${current.error}`;
+            await io[src].save(handle, task);
+            await log(`关注失败 ${atName(current)}: 连续限流, 暂时跳过(恢复时重新入队)`);
+            rateRetryUserId = null;
+          } else {
+            const resetTxt = r.rateReset ? ', 窗口 ' + new Date(r.rateReset * 1000).toLocaleTimeString() + ' 重置' : '';
+            await setLoopWait({ until: Date.now() + backoff, text: '限流重试' });
+            await log(`限流(连续第${rateRetryCount}次, 满3次跳过)${resetTxt}, ${Math.round(backoff / 1000)}秒后重试同一人 ${atName(current)}`);
+            if (!(await sleepInterruptible(backoff, handle))) break;
+            await setLoopWait(null);
+          }
+        } else if (r.alreadyFollowing) {
+          rateRetryUserId = null;
+          current.status = 'skipped';
+          current.error = r.errorText;
+          await io[src].save(handle, task);
+          await log(`跳过 ${atName(current)}(已关注/无法关注)`);
+        } else {
+          rateRetryUserId = null;
+          current.status = 'failed';
+          current.error = r.errorText;
+          task.lastError = `${atName(current)}: ${r.errorText}`;
+          if (r.followLimited) {
+            await io[src].save(handle, task);
+            await log(`关注数已达上限: ${settings.dailyLimitRetryMin}分钟后自动探测重试(直到额度恢复)`);
+            await pauseTask(handle, 'daily-limit', Date.now() + settings.dailyLimitRetryMin * 60_000);
+          } else if (res.status === 403) {
+            await io[src].save(handle, task);
+            await log(`模板过期(403) ${atName(current)}: 请在认证粉丝列表点一次「回关」刷新模板, 然后手动恢复`);
+            await pauseTask(handle, 'template-expired');
+          } else {
+            task.consecutiveFailures.push(Date.now());
+            const stall = evaluateStall(task.consecutiveFailures, Date.now(), settings.stallMin * 60_000, settings.stallMin * 60_000);
+            task.consecutiveFailures = stall.kept;
+            await io[src].save(handle, task);
+            await log(`关注失败 ${atName(current)}: ${r.errorText}`);
+            if (stall.shouldPause) {
+              await pauseTask(handle, 'stalled', Date.now() + settings.autoResumeMin * 60_000);
+            }
+          }
+        }
+        task = await io[src].get(handle);
+        if (!task || task.state !== 'running') break;
+      }
+    } finally {
+      loopRunning = false;
+      runningHandle = null;
+      await setLoopWait(null);
+    }
+  }
+
+  // ---------- 自动 tick(补池 / 自动恢复) ----------
+  async function autoTick() {
+    const handle = await activeHandle();
+    if (!handle) return;
+    if (fetchingFollowers || afSearching || afScanning || afBurstScanning) return;
+    const settings = await getSettings();
+    const af = await getAfTask(handle);
+    const autoTag = nextAutoSearchTag(settings.tags, af.lastAutoSearchTag);
+    if (autoTag && shouldAutoSearch(af, Date.now(), {
+      pendingTarget: AF.PENDING_TARGET, scanMax: AF.SCAN_MAX, poolMin: AF.POOL_MIN, cooldownMs: AF.AUTO_SEARCH_COOLDOWN_MS,
+    })) {
+      if (await acquireLock()) {
+        await log(`池子断供自动补池: 待关注低于水位${AF.PENDING_TARGET}且池子供给不足, 自动抓取 #${autoTag}`);
+        runAfSearch(String(autoTag).replace(/^#/, '').trim(), handle).catch((e) => log(`自动补池异常: ${e}`));
+      }
+    }
+    const fb = await getTask(handle);
+    const now = Date.now();
+    for (const t of [fb, af]) {
+      if (t.state === 'paused' && t.nextAutoResumeAt && now >= t.nextAutoResumeAt) {
+        if (await acquireLock()) resumeTask(handle);
+        break;
+      }
+    }
+    if ((fb.state === 'running' || af.state === 'running') && !loopRunning) {
+      if (await acquireLock()) runLoop(handle);
+    }
+  }
+
+  // ---------- 心跳 + 对外 API ----------
+  let hbTimer = null;
+  let tickTimer = null;
+  let port = null;
+
+  function startHeartbeat() {
+    const beat = () => store.set(K.consoleHost, { at: Date.now() });
+    beat();
+    clearInterval(hbTimer);
+    hbTimer = setInterval(beat, 3_000);
+    try {
+      port = chrome.runtime.connect({ name: 'console-host' });
+      port.onDisconnect.addListener(() => { port = null; });
+    } catch {}
+    window.addEventListener('beforeunload', () => {
+      try { chrome.storage.local.set({ [K.consoleHost]: { at: 0 } }); } catch {}
+    });
+  }
+
+  async function dispatch(cmd, extra) {
+    const h = await activeHandle();
+    switch (cmd) {
+      case 'start-task':
+        if (!h) return { ok: false, message: '未识别到登录账号——点就绪清单打开 x.com 完成识别' };
+        return startTask(h);
+      case 'start-af-task':
+        if (!h) return { ok: false, message: '未识别到登录账号——点就绪清单打开 x.com 完成识别' };
+        return startAfTask(h);
+      case 'pause-task':
+        if (!h) return { ok: false, message: '未识别到登录账号' };
+        await pauseTask(h, 'manual');
+        return { ok: true, message: '已暂停' };
+      case 'resume-task':
+        if (!h) return { ok: false, message: '未识别到登录账号' };
+        await resumeTask(h);
+        return { ok: true, message: '已恢复' };
+      case 'af-search': {
+        if (afSearching) return { ok: false, message: '已在搜索中, 等本轮跑完' };
+        if (afBurstScanning) return { ok: false, message: '正在连扫帖子, 等本轮跑完再抓取' };
+        if (!h) return { ok: false, message: '未识别到登录账号' };
+        const tags = ((await getSettings()).tags) || [];
+        const norm = (t) => String(t || '').replace(/^#/, '').trim().toLowerCase();
+        const want = norm(extra && extra.tag);
+        const tag = tags.find((t) => norm(t) === want) || (tags.length === 1 ? tags[0] : null);
+        const tagStr = tag ? String(tag).replace(/^#/, '').trim() : null;
+        if (!tagStr) {
+          return { ok: false, message: want ? `#${want} 不在配置的互关标签里——先在设置里添加` : '未指定标签——先在设置里配置互关标签' };
+        }
+        runAfSearch(tagStr, h).catch((e) => log(`抓取异常: ${e}`));
+        return { ok: true, message: '搜索已发车——进度见控制台状态行与日志' };
+      }
+      case 'af-scan':
+        if (!h) return { ok: false, message: '未识别到登录账号' };
+        return runAfScanBurst(h);
+      case 'refresh-list':
+        if (!h) return { ok: false, message: '未识别到登录账号' };
+        return runFetch(h);
+      case 'reset-task':
+        if (!h) return { ok: false, message: '无活跃账号' };
+        await store.set(taskKey(h), null);
+        return { ok: true, message: '已重置' };
+      default:
+        return { ok: false, message: 'unknown cmd: ' + cmd };
+    }
+  }
+
+  function boot() {
+    startHeartbeat();
+    clearInterval(tickTimer);
+    tickTimer = setInterval(() => { autoTick().catch(() => {}); }, 30_000);
+    autoTick().catch(() => {});
+    // 浮层/其它页把任务标成 running 时尽快接手, 不必干等 30s tick
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      const hit = Object.keys(changes).some((k) =>
+        k.startsWith(K.task + ':') || k.startsWith(K.afTask + ':'));
+      if (hit) autoTick().catch(() => {});
+    });
+  }
+
+  globalThis.RFHost = { boot, dispatch, startHeartbeat, activeHandle, findXTab };
+})();

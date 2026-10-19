@@ -1,10 +1,6 @@
-// 隔离世界 content script: 页面桥接、拉取器(生产者)、任务执行器(消费者)、x.com 页面状态条。
-// 架构: 拉取器与关注循环解耦, 队列是唯一交界面:
-//   回关: 拉取器翻页拉 BlueVerifiedFollowers → 纯追加合并进 rf_task:{handle}
-//   主动关注: 搜索/扫描器(互关标签页)把候选人写进 rf_af_task:{handle}(见 CONTEXT.md/ADR-0001)
-//   关注循环: 逐条优先(ADR-0001)——每取下一个人先查回关队列再查主动关注队列, 共享账号级每日计数与限流退避
-// 任务循环跑在 x.com 标签页内(不依赖 MV3 service worker 常驻),
-// 数据按账号分键持久化到 chrome.storage.local, 页面刷新/重开后可恢复。
+// 隔离世界 content script: 页面桥接、兑底重放、ADR-0007、x.com 悬浮控件。
+// ADR-0010: 关注循环/抓取/连扫宿主优先=常开控制台; 本页仅在控制台心跳冷掉时作兼容兜底。
+// 架构: 队列仍是唯一交界面; 回关优先(ADR-0001); 数据按账号分键持久化 chrome.storage.local。
 (async () => {
   'use strict';
 
@@ -294,9 +290,19 @@
     } catch {}
   }
 
+  // 控制台宿主是否在线(ADR-0010): 在线则本页不抢跑循环/抓取/连扫
+  async function isConsoleHostAlive() {
+    try {
+      const h = await store.get(K.consoleHost, null);
+      const fresh = RFg.CONSOLE_HOST_FRESH_MS || 15_000;
+      return !!(h && Date.now() - (h.at || 0) < fresh);
+    } catch { return false; }
+  }
+
   // ---------- 领导权锁(防止多标签页同时跑任务/重复拉取) ----------
   let myLockToken = null;
   async function acquireLock() {
+    if (await isConsoleHostAlive()) return false; // 控制台优先
     const lock = await store.get(K.lock, null);
     const now = Date.now();
     const fresh = lock && now - lock.ts < 15_000;
@@ -1187,6 +1193,7 @@
   }
   async function runLoop(handle) {
     if (loopRunning || !handle) return;
+    if (await isConsoleHostAlive()) return; // 控制台在跑, 本页让出
     if (!(await acquireLock())) return;
     loopRunning = true;
     runningHandle = handle;
@@ -1459,15 +1466,52 @@
             sendResponse({ captured });
             break;
           }
+          case 'page-replay-follow': {
+            // 控制台 Route 1 传输失败时的兑底: 本页重放 create.json
+            try {
+              const uid = String((msg && msg.userId) || '');
+              if (!uid) { sendResponse({ error: '缺少 userId' }); break; }
+              const cap = await callPage('list-captured', {});
+              const has = (cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API);
+              if (!has) {
+                sendResponse({ error: '未捕获回关请求——请在认证粉丝列表点一次「回关」' });
+                break;
+              }
+              const res = await callPage('api', { path: FOLLOW_API, params: { user_id: uid } });
+              sendResponse(res);
+            } catch (e) {
+              sendResponse({ error: String((e && e.message) || e) });
+            }
+            break;
+          }
           case 'start-task':
             if (!h) { sendResponse({ ok: false, message: '未识别到登录账号——先打开 x.com 完成识别' }); break; }
+            if (await isConsoleHostAlive()) {
+              // 只登记 running, 让控制台 autoTick 接手
+              const t = await getTask(h);
+              t.state = 'running'; t.pauseReason = null; t.nextAutoResumeAt = null;
+              await saveTask(h, t); await setActive(h);
+              sendResponse({ ok: true, message: '已登记——控制台在线, 由控制台循环接续(请保持控制台打开)' });
+              break;
+            }
             sendResponse(await startTask(h));
             break;
           case 'start-af-task':
             if (!h) { sendResponse({ ok: false, message: '未识别到登录账号——先打开 x.com 完成识别' }); break; }
+            if (await isConsoleHostAlive()) {
+              const t = await getAfTask(h);
+              t.state = 'running'; t.pauseReason = null; t.nextAutoResumeAt = null;
+              await saveAfTask(h, t); await setActive(h);
+              sendResponse({ ok: true, message: '已登记——控制台在线, 由控制台循环接续(请保持控制台打开)' });
+              break;
+            }
             sendResponse(await startAfTask(h));
             break;
           case 'af-search': {
+            if (await isConsoleHostAlive()) {
+              sendResponse({ ok: false, message: '控制台在线——请在控制台点「抓取互关帖」' });
+              break;
+            }
             // 抓取宿主=任意 x.com 标签页(Route 1 直连不挑场), 标签由调用方指定并按配置校验
             // (旧机制要求互关标签页在场, 只是为了从 URL 拿标签+捕获模板; Route 1 落地后两者都不再必需)。
             // 立即应答, 搜索转后台执行——全程可达数分钟(桶节奏 30s/发、池子供血、tid 冷却 70s),
@@ -1488,8 +1532,10 @@
             break;
           }
           case 'af-scan': {
-            // 手动连扫: 任意 x.com 宿主, 跨标签扫到期帖补待关注到 MANUAL_SCAN_TARGET。
-            // 立即应答(校验在 runAfScanBurst 内), 循环转后台; 进度 rf_af_scan_progress。
+            if (await isConsoleHostAlive()) {
+              sendResponse({ ok: false, message: '控制台在线——请在控制台点「扫描帖子」' });
+              break;
+            }
             if (!h) { sendResponse({ ok: false, message: '未识别到登录账号——先打开 x.com 完成识别' }); break; }
             sendResponse(await runAfScanBurst(h));
             break;
