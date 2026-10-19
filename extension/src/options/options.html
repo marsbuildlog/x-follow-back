@@ -5,7 +5,8 @@
   <title>XFollowBack 控制台</title>
   <style>
     * { box-sizing: border-box; }
-    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; max-width: 1080px; margin: 0 auto; padding: 20px; color: #0f1419; }
+    html, body { height: 100%; }
+    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; max-width: 1080px; margin: 0 auto; padding: 20px; color: #0f1419; display: flex; flex-direction: column; min-height: 100%; }
     h1 { font-size: 20px; } h2 { font-size: 16px; margin: 6px 0 8px; } h3.sect { font-size: 14px; margin: 18px 0 6px; border-bottom: 1px solid #e1e8ed; padding-bottom: 4px; }
     section { margin-bottom: 8px; }
     button { padding: 6px 14px; border: 1px solid #1d9bf0; background: #1d9bf0; color: #fff; border-radius: 16px; cursor: pointer; font-size: 13px; margin-right: 8px; margin-bottom: 8px; }
@@ -41,6 +42,11 @@
     th, td { border: 1px solid #e1e8ed; padding: 4px 8px; text-align: left; }
     th { background: #f7f9f9; position: sticky; top: 0; }
     .table-wrap { max-height: 300px; overflow: auto; border-bottom: 1px solid #e1e8ed; }
+    /* 未回关 / 免取关: 表格占满标题与按钮之下的剩余视口, 表内滚动 */
+    #view-notback.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    #view-notback #diff-panel-list,
+    #view-notback #diff-panel-exempt { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    #view-notback .table-wrap { max-height: none; flex: 1; min-height: 0; }
     pre { background: #0f1419; color: #d7dbdc; padding: 12px; border-radius: 8px; font-size: 12px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
     #log { height: 300px; }
     .hint { color: #536471; font-size: 12px; }
@@ -167,14 +173,29 @@
       <button id="btn-diff-unfollow-stop" class="ghost" data-taskop="diff-unfollow-stop" disabled>停止取关</button>
       <span id="diff-op-result" class="hint" data-opresult></span>
     </section>
-    <div class="table-wrap">
-      <table id="diff-table">
-        <thead><tr><th style="width:120px">账号</th><th style="width:120px">昵称</th><th>Bio</th><th style="width:80px">粉丝数</th><th style="width:80px">关注数</th><th style="width:120px">操作</th></tr></thead>
-        <tbody></tbody>
-      </table>
+    <div class="tabs" id="diff-tabs">
+      <button type="button" class="tab active" data-diff-tab="list">未回关名单 <span id="cnt-diff"></span></button>
+      <button type="button" class="tab" data-diff-tab="exempt">免取关名单 <span id="cnt-exempt"></span></button>
     </div>
-    <div class="hint" id="diff-summary"></div>
-    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取在控制台 Route 1 直连执行(保持控制台打开), 页间约 25 秒节奏(防 tid 池烧穿), 大账号可能要十几分钟。表格最多展示 200 行, CSV 导出全量。「批量取关」按设置里的关注间隔节奏对名单全量取关(可随时停止), 成功后从名单移除。「加入免取关」会移出名单并记住, 下次拉取也不会再进来。</div>
+    <div id="diff-panel-list">
+      <div class="table-wrap">
+        <table id="diff-table">
+          <thead><tr><th style="width:120px">账号</th><th style="width:120px">昵称</th><th>Bio</th><th style="width:80px">粉丝数</th><th style="width:80px">关注数</th><th data-diff-sort="ratio" style="width:110px;cursor:pointer" title="点击按 关注数/粉丝数 排序">关注/粉丝</th><th style="width:120px">操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="hint" id="diff-summary"></div>
+    </div>
+    <div id="diff-panel-exempt" style="display:none">
+      <div class="table-wrap">
+        <table id="diff-exempt-table">
+          <thead><tr><th style="width:120px">账号</th><th style="width:120px">昵称</th><th>Bio</th><th style="width:80px">粉丝数</th><th style="width:80px">关注数</th><th data-diff-sort="ratio" style="width:110px;cursor:pointer" title="点击按 关注数/粉丝数 排序">关注/粉丝</th><th style="width:120px">操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="hint" id="diff-exempt-summary"></div>
+    </div>
+    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取在控制台 Route 1 直连执行(保持控制台打开), 页间约 5 秒节奏(防 tid 池烧穿), 大账号仍可能要几分钟。表格最多展示 200 行, CSV 导出当前 Tab 全量。「批量取关」只处理未回关名单。「加入免取关」会移出未回关名单并记住, 下次拉取也不会再进来。「移除」只从免取关名单删掉, 不会立刻加回未回关名单。</div>
   </div>
 
   <!-- 设置 -->

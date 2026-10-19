@@ -594,21 +594,68 @@
     : '';
 
   // ---------- 未回关名单 Tab: 我关注了但对方没关注我 ----------
+  // 关注数/粉丝数, 百分比保留两位小数; 粉丝数为 0 时无比值
+  function followRatioPct(u) {
+    const fans = Number(u && u.followersCount);
+    const following = Number(u && u.friendsCount);
+    if (!Number.isFinite(fans) || fans <= 0 || !Number.isFinite(following)) return null;
+    return Math.round((following / fans) * 10000) / 100;
+  }
+  function fmtRatio(u) {
+    const p = followRatioPct(u);
+    return p == null ? '—' : p.toFixed(2) + '%';
+  }
+  let diffRatioSort = 'asc'; // null | 'desc' | 'asc'；默认关注/粉丝从小到大
+  let diffListTab = 'list'; // list | exempt
+  function diffNameCell(u) {
+    return u.screenName
+      ? `<a href="https://x.com/${encodeURIComponent(u.screenName)}" target="_blank" rel="noopener">${esc(u.name)}</a>`
+      : esc(u.name);
+  }
+  function diffRowCells(u) {
+    return `<td>@${esc(u.screenName)}</td><td>${diffNameCell(u)}</td><td>${esc(u.description)}</td>`
+      + `<td>${u.followersCount ?? 0}</td><td>${u.friendsCount ?? 0}</td><td>${fmtRatio(u)}</td>`;
+  }
+  function sortedDiffUsers(users) {
+    if (!diffRatioSort) return users;
+    const dir = diffRatioSort === 'asc' ? 1 : -1;
+    return users.slice().sort((a, b) => {
+      const ra = followRatioPct(a);
+      const rb = followRatioPct(b);
+      if (ra == null && rb == null) return 0;
+      if (ra == null) return 1; // 无比值始终垫底
+      if (rb == null) return -1;
+      return (ra - rb) * dir;
+    });
+  }
   function renderDiffView(h, diff, diffp, difu, dife) {
     const stateEl = $('diff-state');
     const tbody = $('diff-table') && $('diff-table').querySelector('tbody');
-    if (!tbody) return;
+    const exemptBody = $('diff-exempt-table') && $('diff-exempt-table').querySelector('tbody');
+    if (!tbody || !exemptBody) return;
     const summaryEl = $('diff-summary');
+    const exemptSummary = $('diff-exempt-summary');
     const fetchBtn = $('btn-diff-fetch');
     const unfollowBtn = $('btn-diff-unfollow');
     const stopBtn = $('btn-diff-unfollow-stop');
     const fetching = !!(diffp && diffp.running);
     const unfollowing = !!(difu && difu.running);
-    const exemptN = ((dife && dife.users) || []).length;
+    const exemptUsers = (dife && dife.users) || [];
+    const listPanel = $('diff-panel-list');
+    const exemptPanel = $('diff-panel-exempt');
+    if (listPanel) listPanel.style.display = diffListTab === 'list' ? '' : 'none';
+    if (exemptPanel) exemptPanel.style.display = diffListTab === 'exempt' ? '' : 'none';
+    document.querySelectorAll('#diff-tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.diffTab === diffListTab));
+    const cntDiff = $('cnt-diff');
+    const cntExempt = $('cnt-exempt');
     if (!h) {
       stateEl.textContent = '状态: 未识别账号——打开 x.com 登录后自动识别';
       tbody.innerHTML = '';
+      exemptBody.innerHTML = '';
       summaryEl.textContent = '';
+      if (exemptSummary) exemptSummary.textContent = '';
+      if (cntDiff) cntDiff.textContent = '';
+      if (cntExempt) cntExempt.textContent = '';
       if (fetchBtn) fetchBtn.disabled = true;
       if (unfollowBtn) unfollowBtn.disabled = true;
       if (stopBtn) stopBtn.disabled = true;
@@ -630,23 +677,34 @@
       stateEl.textContent = '状态: 未拉取——先打开一次自己的 /following 页面(捕获模板), 再点「拉取名单」';
     }
     const users = (diff && diff.users) || [];
+    if (cntDiff) cntDiff.textContent = users.length ? `(${users.length})` : '';
+    if (cntExempt) cntExempt.textContent = exemptUsers.length ? `(${exemptUsers.length})` : '';
     if (fetchBtn) fetchBtn.disabled = fetching || unfollowing;
     if (unfollowBtn) unfollowBtn.disabled = fetching || unfollowing || !users.length;
     if (stopBtn) stopBtn.disabled = !unfollowing;
+    const ratioMark = '关注/粉丝' + (diffRatioSort === 'desc' ? ' ↓' : diffRatioSort === 'asc' ? ' ↑' : '');
+    document.querySelectorAll('[data-diff-sort]').forEach((th) => { th.textContent = ratioMark; });
     const actOff = fetching || unfollowing ? ' disabled' : '';
-    tbody.innerHTML = users.slice(0, MAX_ROWS).map((u) =>
-      `<tr>`
-      + `<td>@${esc(u.screenName)}</td><td>${esc(u.name)}</td><td>${esc(u.description)}</td>`
-      + `<td>${u.followersCount ?? 0}</td><td>${u.friendsCount ?? 0}</td>`
+    tbody.innerHTML = sortedDiffUsers(users).slice(0, MAX_ROWS).map((u) =>
+      `<tr>${diffRowCells(u)}`
       + `<td><button type="button" class="ghost" data-diff-exempt="${esc(u.userId)}"${actOff}>加入免取关</button></td>`
       + `</tr>`
     ).join('');
-    if (users.length || exemptN) {
-      summaryEl.textContent = `我关注 ${diff ? diff.total : '—'} 人 · 未回关 ${diff ? diff.notBackCount : users.length} 人`
-        + (exemptN ? ` · 免取关 ${exemptN} 人` : '')
-        + `(表格最多展示 ${MAX_ROWS} 行, 全量请导出 CSV)`;
-    } else {
-      summaryEl.textContent = '';
+    exemptBody.innerHTML = sortedDiffUsers(exemptUsers).slice(0, MAX_ROWS).map((u) =>
+      `<tr>${diffRowCells(u)}`
+      + `<td><button type="button" class="ghost" data-diff-unexempt="${esc(u.userId)}">移除</button></td>`
+      + `</tr>`
+    ).join('');
+    summaryEl.textContent = users.length
+      ? `未回关 ${diff ? diff.notBackCount : users.length} 人`
+        + (diff && diff.total != null ? ` · 我关注 ${diff.total} 人` : '')
+        + (users.length > MAX_ROWS ? `(表格最多展示 ${MAX_ROWS} 行, 全量请导出 CSV)` : '')
+      : '';
+    if (exemptSummary) {
+      exemptSummary.textContent = exemptUsers.length
+        ? `免取关 ${exemptUsers.length} 人(移除只离开本名单, 不会立刻回到未回关; 下次拉取若仍未回关会再出现)`
+          + (exemptUsers.length > MAX_ROWS ? ` · 表格最多展示 ${MAX_ROWS} 行` : '')
+        : '还没有免取关用户';
     }
   }
 
@@ -665,7 +723,10 @@
     const exemptUsers = ((snap[ekey] && snap[ekey].users) || []).slice();
     if (!exemptUsers.some((u) => String(u.userId) === uid)) {
       exemptUsers.push({
-        userId: user.userId, screenName: user.screenName, name: user.name, ts: Date.now(),
+        userId: user.userId, screenName: user.screenName, name: user.name,
+        description: user.description || '',
+        followersCount: user.followersCount ?? 0, friendsCount: user.friendsCount ?? 0,
+        ts: Date.now(),
       });
     }
     const users = diff.users.filter((u) => String(u.userId) !== uid);
@@ -677,22 +738,44 @@
     scheduleRender(0);
   }
 
-  // 未回关名单 CSV 导出(全量, 带 BOM 方便 Excel 直开中文)
+  // 从免取关名单移除, 不写回当前未回关名单(下次拉取不再跳过)
+  async function removeDiffExempt(userId) {
+    const { rf_active: h } = await chrome.storage.local.get('rf_active');
+    if (!h) { showOp('diff-op-result', '未识别到登录账号'); return; }
+    const uid = String(userId || '');
+    if (!uid) return;
+    const ekey = RF.KEY.diffExempt + ':' + h;
+    const snap = await chrome.storage.local.get(ekey);
+    const exempt = snap[ekey];
+    const users = ((exempt && exempt.users) || []).slice();
+    const user = users.find((u) => String(u.userId) === uid);
+    if (!user) { showOp('diff-op-result', '免取关名单里已没有此人'); scheduleRender(0); return; }
+    await chrome.storage.local.set({
+      [ekey]: { handle: h, users: users.filter((u) => String(u.userId) !== uid), ts: Date.now() },
+    });
+    showOp('diff-op-result', `已从免取关移除: @${user.screenName || uid}`);
+    scheduleRender(0);
+  }
+
+  // 当前 Tab CSV 导出(全量, 带 BOM 方便 Excel 直开中文)
   $('btn-diff-csv').onclick = async () => {
     const { rf_active: h } = await chrome.storage.local.get('rf_active');
     if (!h) { showOp('diff-op-result', '未识别到账号——先打开 x.com'); return; }
-    const key = RF.KEY.diff + ':' + h;
-    const diff = (await chrome.storage.local.get(key))[key];
-    const users = (diff && diff.users) || [];
-    if (!users.length) { showOp('diff-op-result', '没有可导出的数据——先拉取名单'); return; }
+    const key = (diffListTab === 'exempt' ? RF.KEY.diffExempt : RF.KEY.diff) + ':' + h;
+    const rec = (await chrome.storage.local.get(key))[key];
+    const users = (rec && rec.users) || [];
+    if (!users.length) { showOp('diff-op-result', diffListTab === 'exempt' ? '免取关名单是空的' : '没有可导出的数据——先拉取名单'); return; }
     const q = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const csv = ['handle,name,bio,followers,friends']
-      .concat(users.map((u) => [u.screenName, u.name, u.description, u.followersCount, u.friendsCount].map(q).join(',')))
+    const csv = ['handle,name,bio,followers,friends,follow_over_fans_pct']
+      .concat(users.map((u) => {
+        const pct = followRatioPct(u);
+        return [u.screenName, u.name, u.description, u.followersCount, u.friendsCount, pct == null ? '' : pct.toFixed(2)].map(q).join(',');
+      }))
       .join('\r\n');
     const url = URL.createObjectURL(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `not-following-back-${h}.csv`;
+    a.download = `${diffListTab === 'exempt' ? 'exempt' : 'not-following-back'}-${h}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     showOp('diff-op-result', `已导出 ${users.length} 条`);
@@ -721,10 +804,21 @@
     scheduleRender(0);
   }
   document.addEventListener('click', (ev) => {
+    const sortTh = ev.target.closest('[data-diff-sort]');
+    if (sortTh) {
+      diffRatioSort = diffRatioSort === 'desc' ? 'asc' : diffRatioSort === 'asc' ? null : 'desc';
+      scheduleRender(0);
+      return;
+    }
     const exemptBtn = ev.target.closest('[data-diff-exempt]');
     if (exemptBtn) {
       if (exemptBtn.disabled) return;
       addDiffExempt(exemptBtn.dataset.diffExempt).catch((e) => showOp('diff-op-result', String(e)));
+      return;
+    }
+    const unexemptBtn = ev.target.closest('[data-diff-unexempt]');
+    if (unexemptBtn) {
+      removeDiffExempt(unexemptBtn.dataset.diffUnexempt).catch((e) => showOp('diff-op-result', String(e)));
       return;
     }
     const openBtn = ev.target.closest('[data-ready-open]');
@@ -771,6 +865,12 @@
   }
 
   // 队列子 tab / 帖池筛选
+  document.querySelectorAll('#diff-tabs .tab').forEach((b) => {
+    b.onclick = () => {
+      diffListTab = b.dataset.diffTab;
+      render();
+    };
+  });
   document.querySelectorAll('#view-followback .tabs .tab').forEach((b) => {
     b.onclick = () => {
       curTab = b.dataset.tab;

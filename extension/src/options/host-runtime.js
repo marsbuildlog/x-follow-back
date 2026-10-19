@@ -504,7 +504,7 @@
   // 页间受 FOLLOWING_MIN_GAP_MS 节流(同路径 tid 冷却 70s, 过快会烧穿池)。
   let lastFollowingFireAt = 0;
   async function awaitFollowingGap() {
-    const gap = AF.FOLLOWING_MIN_GAP_MS || 25_000;
+    const gap = AF.FOLLOWING_MIN_GAP_MS || 5_000;
     const sinceFire = Date.now() - lastFollowingFireAt;
     if (sinceFire < gap) {
       const waitMs = gap - sinceFire;
@@ -540,7 +540,7 @@
       await store.set(K.diffProgress, {
         handle, running: true, page: 0, maxPages: MAX_PAGES, users: 0, ts: Date.now(),
       });
-      await log(`未回关名单发车: 页间节奏约 ${Math.round((AF.FOLLOWING_MIN_GAP_MS || 25_000) / 1000)} 秒/页`);
+      await log(`未回关名单发车: 页间节奏约 ${Math.round((AF.FOLLOWING_MIN_GAP_MS || 5_000) / 1000)} 秒/页`);
       while (page < MAX_PAGES) {
         await awaitFollowingGap();
         const res = await sendBg({
@@ -1159,7 +1159,7 @@
         if (unfollowingDiff) return { ok: false, message: '正在批量取关, 请先停止或等结束再拉取' };
         if (!h) return { ok: false, message: '未识别到登录账号——点就绪清单打开 x.com 完成识别' };
         runDiffFetch().catch((e) => log(`未回关名单拉取异常: ${e}`));
-        return { ok: true, message: '拉取已发车——进度见未回关名单状态行与日志(约25秒/页, 非卡住)' };
+        return { ok: true, message: '拉取已发车——进度见未回关名单状态行与日志(约5秒/页, 非卡住)' };
       case 'diff-unfollow':
         if (unfollowingDiff) return { ok: false, message: '已在取关中, 请等本轮完成或先停止' };
         if (fetchingDiff) return { ok: false, message: '正在拉取名单, 请等拉取完成再取关' };
