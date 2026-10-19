@@ -55,7 +55,9 @@
     } else if (t && t.state === 'running') { color = '#1d9bf0'; }
     else if (t && t.state === 'done') { color = '#16a34a'; }
     dot.style.background = color;
-    const fetching = fp ? ` · 拉取中(第${fp.page}页)` : '';
+    const fetching = (fp && fp.running)
+      ? ` · 拉取中(第${fp.page ?? 0}/${fp.maxPages ?? '?'}页)`
+      : '';
     const resumeAt = t && t.state === 'paused' && t.nextAutoResumeAt
       ? ` · ${Math.max(0, Math.round((t.nextAutoResumeAt - Date.now()) / 60000))}分钟后自动恢复` : '';
     $('state').textContent = text + fetching + resumeAt + lwText;

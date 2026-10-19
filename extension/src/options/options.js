@@ -98,7 +98,7 @@
       fb = r[tk];
       af = r[ak];
       daily = r[dk] && r[dk].date === todayStr() ? r[dk] : { followed: 0 };
-      fp = r.rf_fetch_progress;
+      fp = r.rf_fetch_progress && r.rf_fetch_progress.running ? r.rf_fetch_progress : null;
       afp = r[RF.KEY.afProgress];
       afsp = r[RF.KEY.afScanProgress];
       lw = r[RF.KEY.loopWait] && r[RF.KEY.loopWait].until > Date.now() ? r[RF.KEY.loopWait] : null;
@@ -249,7 +249,9 @@
     const st = stateOf(fb);
     const q = (fb && fb.queue) || [];
     const c = countsOf(q);
-    const fetchChip = fp ? ` · 拉取中(第${fp.page}/${fp.maxPages}页)` : '';
+    const fetchChip = fp
+      ? ` · 拉取中(第${fp.page ?? 0}/${fp.maxPages ?? '?'}页, 累计${fp.users ?? fp.count ?? 0})`
+      : '';
     const tpl = tplCaptured === true ? '✓' : tplCaptured === false ? '⚠' : '';
     el.innerHTML = `
       <h3><span class="dot" style="background:${st.color}"></span>回关任务 ${h ? `<span class="hint">@${esc(h)}</span>` : ''}<button class="more" data-goto="followback">详情 →</button></h3>
@@ -363,7 +365,9 @@
     } else if (!fb || !fb.queue) {
       $('task-state').textContent = `账号: @${h} · 状态: 未启动(填充队列后点「开始回关」)`;
     } else {
-      const fetchChip = fp ? ` · <span style="color:#7c3aed;font-weight:700">拉取中(第${fp.page}/${fp.maxPages}页, 累计${fp.users})</span>` : '';
+      const fetchChip = fp
+        ? ` · <span style="color:#7c3aed;font-weight:700">拉取中(第${fp.page ?? 0}/${fp.maxPages ?? '?'}页, 累计${fp.users ?? fp.count ?? 0})</span>`
+        : '';
       $('task-state').innerHTML =
         `账号: @${esc(h)} · 状态: <b>${esc(st.text)}</b>` +
         ` · 总数: ${q.length} · 待回关: ${c.pending} · 今日已回关: ${daily.followed}` +

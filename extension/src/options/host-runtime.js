@@ -473,16 +473,19 @@
   }
 
   // ---------- 拉粉(Route 1) ----------
+  // 进度字段与 content.js / 控制台 UI 对齐: {running, page, maxPages, users}
   async function runFetch(screenName) {
     if (fetchingFollowers) return { ok: false, message: '已在拉取中' };
     fetchingFollowers = true;
     try {
-      await store.set(K.fetchProgress, { running: true, page: 0, screenName, updatedAt: Date.now() });
       let cursor = null;
       let page = 0;
-      const MAX_PAGES = 8;
-      const count = 20;
+      const MAX_PAGES = 8; // 100/页 → 最多拉前 800 人
+      const count = 100;
       const all = [];
+      await store.set(K.fetchProgress, {
+        running: true, screenName, page: 0, maxPages: MAX_PAGES, users: 0, updatedAt: Date.now(),
+      });
       while (page < MAX_PAGES) {
         const res = await sendBg({
           cmd: 'route1-graphql', op: OP_FOLLOWERS,
@@ -504,14 +507,25 @@
           return { ok: false, message: parsed.error };
         }
         all.push(...(parsed.users || []));
-        page++;
-        await store.set(K.fetchProgress, { running: true, page, screenName, count: all.length, updatedAt: Date.now() });
-        if (!parsed.cursor || parsed.cursor === cursor) break;
+        await store.set(K.fetchProgress, {
+          running: true, screenName,
+          page: page + 1, maxPages: MAX_PAGES, users: all.length,
+          hasMore: !!parsed.cursor, updatedAt: Date.now(),
+        });
+        await log(`拉取第${page + 1}页: +${(parsed.users || []).length}, 累计${all.length}, cursor=${parsed.cursor ? '有' : '无'}`);
+        // 列表拉完后接口仍可能返回非空 cursor, 0 人即视为拉完(与 content.js 一致)
+        if (!parsed.cursor || parsed.cursor === cursor || !(parsed.users || []).length) break;
         cursor = parsed.cursor;
+        page++;
         await sleep(1200 + Math.random() * 800);
       }
+      // 新粉在前 → 倒序后老粉先入队(等最久的先回关)
+      const seen = new Set();
+      const users = all
+        .filter((u) => (seen.has(u.userId) ? false : (seen.add(u.userId), true)))
+        .reverse();
       const t = await getTask(screenName);
-      const added = mergeUsers(t, all);
+      const added = mergeUsers(t, users);
       t.lastFetchAt = Date.now();
       await saveTask(screenName, t);
       if (t.state === 'done' && t.queue.some((q) => q.status === 'pending')) {
@@ -520,14 +534,14 @@
         await log('拉到新粉, 回关自动续跑');
         runLoop(screenName);
       }
-      await log(`拉取完成: 本轮${all.length}人, 新入队${added}`);
+      await log(`拉取完成: 本轮${users.length}人, 新入队${added}`);
       return { ok: true, message: `拉取完成: +${added}` };
     } catch (e) {
       await log(`拉取异常: ${e}`);
       return { ok: false, message: String(e) };
     } finally {
       fetchingFollowers = false;
-      await store.set(K.fetchProgress, { running: false, finishedAt: Date.now(), updatedAt: Date.now() }).catch(() => {});
+      await store.set(K.fetchProgress, null).catch(() => {});
     }
   }
 
