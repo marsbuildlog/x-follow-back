@@ -55,6 +55,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) + '(分步进度见实验卡片输出区)' }));
     return true; // 异步 sendResponse
   }
+  if (msg.cmd === 'crosspath-tid-probe') {
+    // GraphQL 跨路径 tid 对照(ADR-0004 待放行项): 不改生产 pick, 只出实验结论
+    withTimeout(crosspathTidProbe(msg.op, msg.variables), 45_000, '跨路径 tid 实验')
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
+    return true;
+  }
 });
 
 // ---------- 身份探针(ADR-0005): 免输入识别登录账号 ----------
@@ -501,6 +508,7 @@ async function route1Graphql(op, vars) {
   if (!ck || !ck.value) return { error: '读不到 ct0 cookie' };
   const { [TID_KEY]: pool0 } = await chrome.storage.local.get(TID_KEY);
   let pool = pool0 || [];
+  // GraphQL 只取同路径(跨路径不对称: Search→Detail 可行、Detail→Search 404, 见 ADR-0004)
   const tidEntry = globalThis.RFTidPool.pick(pool, { path: tpl.p, cooldownMs: RF.AF.TID_COOLDOWN_MS });
   if (!tidEntry) {
     harvestBoost('池见底').catch(() => {}); // 异步供血(本发照常报错走回退, 下几发受益)
@@ -529,7 +537,7 @@ async function route1Graphql(op, vars) {
   // 任何拿到 HTTP 响应的发射都记 ok 进入冷却换下一条:
   //   422/429 已被 X 处理过(实测后再用同 tid → 404);
   //   404 空体本身就表示该 tid 此刻不可用——若不记 ok, pick 会因 at 已过期立刻重选同一条连打 404。
-  pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tpl.p, true, Date.now());
+  pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tidEntry.p, true, Date.now());
   await chrome.storage.local.set({ [TID_KEY]: pool });
   return { status: res.status, ok: res.ok, body, rl };
 }
@@ -628,6 +636,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // 可观测性: 每步进度实时写 rf_r1_probe(options 页监听 storage 现场渲染);
 //   每个网络调用带 20s 中断超时——SW 里任何一环挂住都不会让发射永远"发射中"。
 const R1_STATE_KEY = 'rf_r1_probe';
+const XP_STATE_KEY = 'rf_xp_tid_probe'; // 跨路径 tid 对照进度
 const R1_FETCH_TIMEOUT_MS = 20_000;
 
 // 竞速超时: 超过 ms 未决则以 label 报错(纯兑底用, 不取消原任务)
@@ -713,7 +722,7 @@ async function route1Probe(op, variables) {
       bodyLen: body.length, isJson, head: body.slice(0, 160), rl,
       headers: Object.keys(sets[setName]).sort(),
     });
-    pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tpl.p, res.ok, Date.now());
+    pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tidEntry.p, res.ok, Date.now());
     await step(`${setName} 返回`, `HTTP ${res.status} ${body.length}B ${Date.now() - f0}ms${res.status === 429 ? '(429 即停)' : ''}`);
     if (res.status === 429) break; // 限流桶热了, 换头集再发只会更糟
   }
@@ -726,4 +735,151 @@ async function route1Probe(op, variables) {
   };
   await finish(r);
   return r;
+}
+
+// ---------- GraphQL 跨路径 tid 对照实验(ADR-0004 待放行) ----------
+// 目标 op 的模板 + minimal 三件套, 连发:
+//   ①同路径 tid(基线, 若有) ②异路径 tid(实验组, 必需)
+// 结论写 verdict: cross-ok / cross-reject / inconclusive; 不改生产 pick。
+async function crosspathTidProbe(op, variables) {
+  const steps = [];
+  const t0 = Date.now();
+  const step = (name, info) => {
+    steps.push({ at: Date.now() - t0, name, info: info || '' });
+    return chrome.storage.local.set({ [XP_STATE_KEY]: { done: false, steps } }).catch(() => {});
+  };
+  const finish = (result) =>
+    chrome.storage.local.set({ [XP_STATE_KEY]: Object.assign({ done: true, steps }, result) }).catch(() => {});
+
+  const name = String(op || '').trim() || 'TweetDetail';
+  await step('读模板', name);
+  const tplKey = TPL_PREFIX + name;
+  const { [tplKey]: tpl } = await chrome.storage.local.get(tplKey);
+  if (!tpl || !tpl.p || !tpl.v0) {
+    const r = { ok: false, error: `未旁听到 ${name} 模板——先在 x.com 触发一次该查询` };
+    await finish(r);
+    return r;
+  }
+  const { [RF.KEY.bearer]: bearer } = await chrome.storage.local.get(RF.KEY.bearer);
+  if (!bearer) {
+    const r = { ok: false, error: 'bearer 未收割——打开任意 x.com' };
+    await finish(r);
+    return r;
+  }
+  const ck = await chrome.cookies.get({ url: 'https://x.com/', name: 'ct0' }).catch(() => null);
+  if (!ck || !ck.value) {
+    const r = { ok: false, error: '读不到 ct0 cookie——确认已登录 x.com' };
+    await finish(r);
+    return r;
+  }
+
+  const { [TID_KEY]: pool0 } = await chrome.storage.local.get(TID_KEY);
+  let pool = pool0 || [];
+  const cd = RF.AF.TID_COOLDOWN_MS;
+  const same = globalThis.RFTidPool.pick(pool, { path: tpl.p, cooldownMs: cd });
+  const cross = globalThis.RFTidPool.pickCrossPath(pool, { notPath: tpl.p, cooldownMs: cd });
+  await step('挑 tid', `同路径${same ? '有' : '无'} · 异路径${cross ? pathTail(cross.p) : '无'}`);
+  if (!cross) {
+    const r = {
+      ok: false,
+      error: '池中无异路径可用 tid——先旁听别的 GraphQL(如 SearchTimeline / Following), 等冷却后再试',
+      targetPath: tpl.p,
+      tidPoolSize: pool.length,
+    };
+    await finish(r);
+    return r;
+  }
+
+  const vars = globalThis.RFRoute1.mergeVariables(tpl.v0, variables || {});
+  let req;
+  try { req = globalThis.RFRoute1.buildRequest(tpl, vars); }
+  catch (e) {
+    const r = { ok: false, error: '构造请求失败: ' + String((e && e.message) || e) };
+    await finish(r);
+    return r;
+  }
+
+  async function fire(label, tidEntry) {
+    const headers = globalThis.RFRoute1.headerSets(tpl.h, bearer, ck.value, tidEntry.t, req.isPost).minimal;
+    await step(label + ' 发射', `tid←${pathTail(tidEntry.p)} 龄${Math.round((Date.now() - tidEntry.at) / 1000)}s`);
+    const f0 = Date.now();
+    const ac = new AbortController();
+    const kill = setTimeout(() => ac.abort(), R1_FETCH_TIMEOUT_MS);
+    let res, body;
+    try {
+      res = await fetch(req.url, { method: req.method, headers, credentials: 'include', body: req.body, signal: ac.signal });
+      body = await res.text();
+    } catch (e) {
+      clearTimeout(kill);
+      const msg = String((e && e.message) || e) + (ac.signal.aborted ? '(>20s)' : '');
+      await step(label + ' 网络异常', msg);
+      return { set: label, error: '网络异常: ' + msg, donorPath: tidEntry.p };
+    }
+    clearTimeout(kill);
+    // 冷却记在 tid 原捕获路径上(异路径发射成功也要让该条进入冷却)
+    pool = globalThis.RFTidPool.markResult(pool, tidEntry.t, tidEntry.p, true, Date.now());
+    const a = {
+      set: label, status: res.status, ok: res.ok, ms: Date.now() - f0,
+      bodyLen: body.length, head: body.slice(0, 120),
+      donorPath: tidEntry.p, tidReject: res.status === 404 && String(body || '').trim().length === 0,
+    };
+    await step(label + ' 返回', `HTTP ${res.status} ${body.length}B ${a.ms}ms${a.tidReject ? '(疑似 tid 拒收)' : ''}`);
+    return a;
+  }
+
+  const attempts = [];
+  if (same) {
+    attempts.push(await fire('同路径基线', same));
+    if (attempts[0].status === 429) {
+      await chrome.storage.local.set({ [TID_KEY]: pool });
+      const r = {
+        ok: false, verdict: 'inconclusive', error: '同路径基线已 429, 桶热不宜再发跨路径',
+        attempts, targetPath: tpl.p, targetOp: name,
+      };
+      await finish(r);
+      return r;
+    }
+  } else {
+    await step('跳过同路径基线', '池中无同路径可用 tid(不影响跨路径结论)');
+  }
+
+  // 基线后重新挑异路径(避免刚好被基线同 tid 撞上; 通常路径不同)
+  const cross2 = globalThis.RFTidPool.pickCrossPath(pool, { notPath: tpl.p, cooldownMs: cd }) || cross;
+  attempts.push(await fire('跨路径实验', cross2));
+  await chrome.storage.local.set({ [TID_KEY]: pool });
+
+  const crossA = attempts.find((a) => a.set === '跨路径实验');
+  const sameA = attempts.find((a) => a.set === '同路径基线');
+  let verdict = 'inconclusive';
+  let ok = false;
+  if (crossA && crossA.ok) {
+    verdict = 'cross-ok';
+    ok = true;
+  } else if (crossA && crossA.tidReject) {
+    verdict = 'cross-reject';
+  } else if (crossA && crossA.status != null) {
+    verdict = 'cross-other'; // 有 HTTP 但非 200 且非空 404——可能是业务/模板问题, 不宜直接否决跨路径
+  }
+
+  const r = {
+    ok,
+    verdict,
+    verdictText: ({
+      'cross-ok': '✅ 这一对方向可用(donor→目标)——跨路径有向, 勿推广为无向兑底',
+      'cross-reject': '❌ 这一对方向拒收(404 空 body)——生产 GraphQL 维持同路径 pick',
+      'cross-other': '⚠ 非 tid 拒收形态——看 attempts 再判(可能模板/变量/限流)',
+      'inconclusive': '⚠ 结论不足',
+    })[verdict] || verdict,
+    attempts,
+    baselineOk: !!(sameA && sameA.ok),
+    targetOp: name,
+    targetPath: tpl.p,
+    tidPoolSize: pool.length,
+  };
+  await finish(r);
+  return r;
+}
+
+function pathTail(p) {
+  return String(p || '').split('/').pop() || '(空)';
 }

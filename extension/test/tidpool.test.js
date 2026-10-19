@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 require('../src/shared/tidpool.js');
-const { add, pick, markResult, prune, shouldHarvest, CAP } = globalThis.RFTidPool;
+const { add, pick, pickCrossPath, markResult, prune, shouldHarvest, CAP } = globalThis.RFTidPool;
 
 const T1 = 'a'.repeat(94);
 const T2 = 'b'.repeat(94);
@@ -69,10 +69,19 @@ test('pick: 捕获后冷却期内不可用(页面刚用过), 过期可用', () =
   assert.equal(pick(pool, { path: SEARCH, now: 1000 + CD, cooldownMs: CD }).t, T1);
 });
 
-test('pick: 只取同路径——池里全是别的路径时返回 null(跨路径未证实, ADR-0004)', () => {
+test('pick: 默认只同路径; allowCrossPath 才兑底(跨路径不对称, 生产勿开)', () => {
   const pool = add([], T1, DETAIL, 1000);
   assert.equal(pick(pool, { path: SEARCH, now: 999999, cooldownMs: CD }), null);
   assert.equal(pick(pool, { path: DETAIL, now: 999999, cooldownMs: CD }).t, T1);
+  assert.equal(pick(pool, { path: SEARCH, now: 999999, cooldownMs: CD, allowCrossPath: true }).t, T1);
+});
+
+test('pickCrossPath: 取异路径可用 tid; 同路径不算', () => {
+  let pool = add([], T1, DETAIL, 1000);
+  pool = add(pool, T2, SEARCH, 2000);
+  assert.equal(pickCrossPath(pool, { notPath: SEARCH, now: 2000 + CD, cooldownMs: CD }).t, T1);
+  assert.equal(pickCrossPath(pool, { notPath: DETAIL, now: 2000 + CD, cooldownMs: CD }).t, T2);
+  assert.equal(pickCrossPath(pool, { notPath: SEARCH, now: 1000 + CD - 1, cooldownMs: CD }), null);
 });
 
 test('pick: 多个可用时取最新捕获的', () => {

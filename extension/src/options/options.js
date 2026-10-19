@@ -289,10 +289,10 @@
   function afScanChip(afsp) {
     if (!afsp) return '';
     if (afsp.running) {
-      return ` <span style="color:#7c3aed;font-weight:700">· 扫描中: 已扫 ${afsp.scanned ?? 0} 帖 · 待关注 ${afsp.pending ?? 0}/${afsp.target ?? RF.AF.MANUAL_SCAN_TARGET}</span>`;
+      return `<span style="color:#7c3aed;font-weight:700">扫描中: 已扫 ${afsp.scanned ?? 0} 帖 · 待关注 ${afsp.pending ?? 0}/${afsp.target ?? RF.AF.MANUAL_SCAN_TARGET}</span>`;
     }
     if (afsp.finishedAt && Date.now() - afsp.finishedAt < 120_000) {
-      return ` <span style="color:#1b5e20">· 上轮连扫完成: 扫了 ${afsp.scanned ?? 0} 帖, 候选+${afsp.added ?? 0}, 待关注 ${afsp.pending ?? '—'}</span>`;
+      return `<span style="color:#1b5e20">上轮连扫完成: 扫了 ${afsp.scanned ?? 0} 帖, 候选+${afsp.added ?? 0}, 待关注 ${afsp.pending ?? '—'}</span>`;
     }
     return '';
   }
@@ -311,9 +311,10 @@
     const scanning = !!(afsp && afsp.running);
     const water = (af && af.state === 'running' && c.pending < RF.AF.PENDING_TARGET && !scanning)
       ? ` <span class="hint">(低于水位 ${RF.AF.PENDING_TARGET}, 循环顺路扫帖补员中)</span>` : '';
+    const scanChipDash = afScanChip(afsp);
     el.innerHTML = `
       <h3><span class="dot" style="background:${st.color}"></span>主动关注任务 ${h ? `<span class="hint">@${esc(h)}</span>` : ''}<button class="more" data-goto="activefollow">详情 →</button></h3>
-      <div>状态: <b>${esc(st.text)}</b>${searching ? ` <span style="color:#7c3aed;font-weight:700">· 抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>` : ''}${afScanChip(afsp)}${loopWaitChip()}</div>
+      <div>状态: <b>${esc(st.text)}</b>${searching ? ` · <span style="color:#7c3aed;font-weight:700">抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>` : ''}${scanChipDash ? ' · ' + scanChipDash : ''}${loopWaitChip()}</div>
       <div>待关注 <span class="num">${c.pending}</span> / 队列 ${q.length} · 帖子池 ${poolTotal}${poolDue ? `(待扫 ${poolDue})` : ''}${water}</div>
       ${h ? taskCardOps('af', af, { searching, scanning }) : '<div class="hint">打开 x.com 登录后自动识别账号</div>'}
     `;
@@ -443,22 +444,34 @@
     const scanning = !!(afsp && afsp.running);
     const finishedFresh = afp && afp.running === false && afp.finishedAt && Date.now() - afp.finishedAt < 120_000;
     const searchChip = searching
-      ? ` · <span style="color:#7c3aed;font-weight:700">抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>`
+      ? `<span style="color:#7c3aed;font-weight:700">抓取中 #${esc(afp.tag)}(第${afp.page}/${afp.maxPages}页, 帖子${afp.posts ?? 0})</span>`
       : finishedFresh
-        ? ` · <span style="color:#1b5e20">上轮抓取完成: 帖子${afp.posts ?? '—'}</span>`
+        ? `<span style="color:#1b5e20">上轮抓取完成: 帖子${afp.posts ?? '—'}</span>`
         : '';
     const scanChip = afScanChip(afsp);
+    const poolStateEl = $('af-pool-state');
 
     if (!h) {
       $('af-state').textContent = '状态: 未识别账号——打开 x.com 登录后自动识别';
+      if (poolStateEl) poolStateEl.textContent = '';
     } else if (!af || !af.queue) {
       $('af-state').textContent = `账号: @${h} · 状态: 未启动(先完成引导: 配置标签 → 抓取互关帖)`;
+      if (poolStateEl) {
+        poolStateEl.innerHTML = [searchChip, scanChip].filter(Boolean).join(' · ')
+          || '帖子池: 先抓取互关帖再扫描评论';
+      }
     } else {
       $('af-state').innerHTML =
-        `账号: @${esc(h)} · 状态: <b>${esc(st.text)}</b>${searchChip}${scanChip}` +
-        ` · 队列: ${q.length}(待关注 ${c.pending}) · 帖子池: ${poolTotal}(待扫 ${poolDue})` +
+        `账号: @${esc(h)} · 状态: <b>${esc(st.text)}</b>` +
+        ` · 队列: ${q.length}(待关注 ${c.pending})` +
         loopWaitChip() +
         (af.lastError ? `<br>最近错误: <span style="color:#b02a37">${esc(af.lastError)}</span>` : '');
+      if (poolStateEl) {
+        const bits = [`帖子池: ${poolTotal}(待扫 ${poolDue})`];
+        if (searchChip) bits.push(searchChip);
+        if (scanChip) bits.push(scanChip);
+        poolStateEl.innerHTML = bits.join(' · ');
+      }
     }
 
     // 互关帖池表
@@ -909,6 +922,55 @@
       const out = $('fp-out');
       out.textContent = JSON.stringify(res, null, 2);
       out.style.display = 'block';
+    };
+
+    // tid 跨路径对照: 分步进度走 rf_xp_tid_probe
+    const xpRender = (st) => {
+      if (!st || !st.steps) return;
+      const lines = st.steps.map((s) => `[+${(s.at / 1000).toFixed(1)}s] ${s.name}${s.info ? ' — ' + s.info : ''}`);
+      if (st.done) {
+        const { steps, ...rest } = st;
+        lines.push('', 'JSON 结果:', JSON.stringify(rest, null, 2));
+      }
+      const out = $('xp-out');
+      out.textContent = lines.join('\n');
+      out.style.display = 'block';
+      if (st.done) {
+        const v = $('xp-verdict');
+        v.textContent = st.verdictText || st.error || (st.ok ? '✅' : '❌');
+        v.style.color = st.verdict === 'cross-ok' ? '#1b5e20' : (st.verdict === 'cross-reject' ? '#b02a37' : '#92400e');
+        $('btn-xp-probe').disabled = false;
+      }
+    };
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes.rf_xp_tid_probe) return;
+      xpRender(changes.rf_xp_tid_probe.newValue);
+    });
+    $('btn-xp-probe').onclick = async () => {
+      const v = $('xp-verdict');
+      const op = ($('xp-op').value || 'TweetDetail').trim();
+      $('btn-xp-probe').disabled = true;
+      v.textContent = '发射中…(同路径基线 → 跨路径实验)';
+      v.style.color = '';
+      // 目标模板首见 variables 作发射体(与 Route 1 探针同款)
+      let variables = {};
+      try {
+        const key = (globalThis.RF.KEY.gqlTpl || 'rf_tpl') + ':' + op;
+        const { [key]: tpl } = await chrome.storage.local.get(key);
+        if (tpl && tpl.v0) variables = tpl.v0;
+      } catch {}
+      let res;
+      try { res = await chrome.runtime.sendMessage({ cmd: 'crosspath-tid-probe', op, variables }); }
+      catch (e) { res = { ok: false, error: String(e) }; }
+      $('btn-xp-probe').disabled = false;
+      v.textContent = (res && (res.verdictText || res.error)) || '无应答';
+      v.style.color = res && res.verdict === 'cross-ok' ? '#1b5e20'
+        : (res && res.verdict === 'cross-reject' ? '#b02a37' : '#92400e');
+      if (res && !res.steps) {
+        const out = $('xp-out');
+        out.textContent = JSON.stringify(res, null, 2);
+        out.style.display = 'block';
+      }
     };
   }
 

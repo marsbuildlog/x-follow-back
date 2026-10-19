@@ -273,13 +273,13 @@
   }
 
   // ---- tid 收割池取用/写回(ADR-0004) ----
-  // 池子由 background SW 的 webRequest 旁听填充(用户刷 X 即持续供血);
-  // 只取同路径且冷却已过的 tid(跨路径未证实); 池子没有则返回 null, 调用方回退捕获 tid + 等冷却。
+  // 池子由 background SW 的 webRequest 旁听填充; GraphQL 只取同路径(跨路径不对称, 见 ADR-0004)。
+  // poolPick 返回 {t,p}; mark 必须用捕获路径 p。
   async function poolPick(path) {
     try {
       const { [K.tidPool]: pool } = await chrome.storage.local.get(K.tidPool);
       const e = globalThis.RFTidPool.pick(pool, { path, now: Date.now(), cooldownMs: AF.TID_COOLDOWN_MS });
-      return e ? e.t : null;
+      return e ? { t: e.t, p: e.p } : null;
     } catch { return null; }
   }
   async function poolMark(tid, path, ok) {
@@ -646,7 +646,7 @@
   // 传输路径优先级(ADR-0004):
   //   Route 1: background 直连(bearer+csrf+tid 三件套, 2026-10-11 对照实验双 200)——材料全在 storage,
   //     不依赖本页捕获过模板, 浏览器刚重启也能直接扫; 结构性缺料才回退页面内重放。
-  //   页面重放(回退): page-hook 用本页捕获模板, tid 来源=池子同路径 → 捕获 tid+等冷却(历史行为)。
+  //   页面重放(回退): page-hook 用本页捕获模板, tid 来源=池子同路径。
   // tid 冷却: 同 tid 成功后约60秒内 X 拒绝一切同tid请求(404, 空 body); 失败不延长冷却。
   let lastSearchOkAt = 0;
   let lastSearchFireAt = 0; // 上次发射时刻(含失败): 桶节奏兼底用, 与 tid 冷却是两套独立约束
@@ -666,7 +666,7 @@
       // Route 1: background 直连
       let res = await sendBg({ cmd: 'route1-graphql', op: OP_SEARCH, vars: { rawQuery, count: AF.SEARCH_PAGE_SIZE, cursor: cursor || null } });
       const viaRoute1 = !!(res && !res.error);
-      let poolTid = null, searchPath = null, entry = null;
+      let poolTid = null, markPath = null, entry = null;
       if (!viaRoute1) {
         if (res && res.error) await log(`Route 1 不可用(${res.error}), 本发回退页面内重放`);
         const cap = await callPage('list-captured', {});
@@ -679,8 +679,10 @@
         const base = (r1Tpl && r1Tpl.v0) || entry.variables || {};
         const variables = { ...base, rawQuery, count: AF.SEARCH_PAGE_SIZE };
         if (cursor) variables.cursor = cursor; else delete variables.cursor;
-        searchPath = new URL(entry.url).pathname;
-        poolTid = await poolPick(searchPath);
+        const searchPath = new URL(entry.url).pathname;
+        const picked = await poolPick(searchPath);
+        poolTid = picked ? picked.t : null;
+        markPath = picked ? picked.p : searchPath;
         if (!poolTid) {
           // 冷却基准取两者较晚者: 捕获请求自身的成功时刻(capturedAt) / 我们上一次重放成功时刻
           const since = Date.now() - Math.max(entry.capturedAt || 0, lastSearchOkAt);
@@ -700,8 +702,8 @@
         continue;
       }
       if (res.ok) lastSearchOkAt = Date.now();
-      // 404 也记消耗: 否则同 tid 会被立刻重选连打(与 background route1Graphql 同策略)
-      if (!viaRoute1) await poolMark(poolTid, searchPath, res.ok || res.status === 404);
+      // 404 也记消耗: 否则同 tid 会被立刻重选连打(与 background route1Graphql 同策略); mark 用捕获路径
+      if (!viaRoute1) await poolMark(poolTid, markPath, res.ok || res.status === 404);
       const parsed = parseSearchTimeline(res.body);
       // 非 JSON 响应(空体/错误页)带上状态码, 便于定位
       if (parsed.error) {
@@ -898,6 +900,9 @@
       }
 
       while (page < AF.SCAN_MAX_PAGES) {
+        const pathLabel = mode === 'detail' ? '详情' : '搜索';
+        // 总页数事先未知: 日志用「当前页/上限页」(SCAN_MAX_PAGES)
+        await log(`扫描帖子 ${postId}: 抓取评论第${page + 1}/${AF.SCAN_MAX_PAGES}页(上限, ${pathLabel})`);
         const out = mode === 'detail'
           ? await tweetDetailPage(postId, cursor)
           : await searchPage(`conversation_id:${postId}`, cursor);
@@ -914,6 +919,7 @@
         }
         if (out.rateLimitedOut) { limited = true; break; }
         allItems.push(...out.items);
+        await log(`扫描帖子 ${postId}: 评论第${page + 1}/${AF.SCAN_MAX_PAGES}页完成, +${out.items.length}条, 累计${allItems.length}`);
         if (!out.cursor || out.cursor === cursor || out.items.length === 0) break;
         cursor = out.cursor;
         page++;
@@ -943,7 +949,7 @@
       const { users } = eligibleFromItems(allItems, tag);
       const { added } = await enqueueAfCandidates(handle, users, tag);
       const pathLabel = mode === 'detail' ? '详情' : '搜索';
-      await log(`扫描帖子 ${postId}(第${scanNo}/${AF.SCAN_MAX}次, ${pathLabel}${page + 1}页, 解析${allItems.length}条): 候选+${added}`);
+      await log(`扫描帖子 ${postId} 完成(第${scanNo}/${AF.SCAN_MAX}次, ${pathLabel}实际${page + 1}页/上限${AF.SCAN_MAX_PAGES}, 解析${allItems.length}条): 候选+${added}`);
       return { added };
     } catch (e) {
       await log(`扫描异常: ${e}`);

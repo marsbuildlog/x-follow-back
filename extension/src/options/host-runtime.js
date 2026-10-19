@@ -372,6 +372,9 @@
         await log(`扫描帖子 ${postId}: 未旁听 TweetDetail 模板, 兑底 conversation_id 搜索`);
       }
       while (page < AF.SCAN_MAX_PAGES) {
+        const pathLabel = mode === 'detail' ? '详情' : '搜索';
+        // 总页数事先未知: 日志用「当前页/上限页」(SCAN_MAX_PAGES)
+        await log(`扫描帖子 ${postId}: 抓取评论第${page + 1}/${AF.SCAN_MAX_PAGES}页(上限, ${pathLabel})`);
         const out = mode === 'detail'
           ? await tweetDetailPage(postId, cursor)
           : await searchPage(`conversation_id:${postId}`, cursor);
@@ -386,6 +389,7 @@
         }
         if (out.rateLimitedOut) { limited = true; break; }
         allItems.push(...out.items);
+        await log(`扫描帖子 ${postId}: 评论第${page + 1}/${AF.SCAN_MAX_PAGES}页完成, +${out.items.length}条, 累计${allItems.length}`);
         if (!out.cursor || out.cursor === cursor || out.items.length === 0) break;
         cursor = out.cursor;
         page++;
@@ -404,7 +408,7 @@
       const { users } = eligibleFromItems(allItems, tag);
       const { added } = await enqueueAfCandidates(handle, users, tag);
       const pathLabel = mode === 'detail' ? '详情' : '搜索';
-      await log(`扫描帖子 ${postId}(第${scanNo}/${AF.SCAN_MAX}次, ${pathLabel}${page + 1}页, 解析${allItems.length}条): 候选+${added}`);
+      await log(`扫描帖子 ${postId} 完成(第${scanNo}/${AF.SCAN_MAX}次, ${pathLabel}实际${page + 1}页/上限${AF.SCAN_MAX_PAGES}, 解析${allItems.length}条): 候选+${added}`);
       return { added };
     } catch (e) {
       await log(`扫描异常: ${e}`);
@@ -889,8 +893,46 @@
     }
   }
 
+  // 扩展重载/控制台重启后内存闸门已空, 但 storage 里 running 可能仍为 true → 按钮长期灰掉。
+  // 启动时清掉抓取/连扫/拉粉进行中标志(15 分钟陈旧兜底仍保留在 options UI)。
+  async function clearInterruptedProgress() {
+    const now = Date.now();
+    try {
+      const snap = await chrome.storage.local.get([
+        K.afProgress, K.afScanProgress, K.fetchProgress, K.diffProgress,
+      ]);
+      const patch = {};
+      const afp = snap[K.afProgress];
+      if (afp && afp.running) {
+        patch[K.afProgress] = Object.assign({}, afp, {
+          running: false, finishedAt: now, updatedAt: now, stopReason: '宿主重启/重载中断',
+        });
+      }
+      const afsp = snap[K.afScanProgress];
+      if (afsp && afsp.running) {
+        patch[K.afScanProgress] = Object.assign({}, afsp, {
+          running: false, finishedAt: now, updatedAt: now, stopReason: '宿主重启/重载中断',
+        });
+      }
+      if (snap[K.fetchProgress] && snap[K.fetchProgress].running) {
+        patch[K.fetchProgress] = null;
+      }
+      const diffp = snap[K.diffProgress];
+      if (diffp && diffp.running) {
+        patch[K.diffProgress] = Object.assign({}, diffp, {
+          running: false, ts: now, stopReason: '宿主重启/重载中断',
+        });
+      }
+      if (Object.keys(patch).length) {
+        await chrome.storage.local.set(patch);
+        await log('已清除重载前未结束的进度标志(抓取/连扫/拉粉/未回关名单), 按钮可再点');
+      }
+    } catch {}
+  }
+
   function boot() {
     startHeartbeat();
+    clearInterruptedProgress().catch(() => {});
     clearInterval(tickTimer);
     tickTimer = setInterval(() => { autoTick().catch(() => {}); }, 30_000);
     autoTick().catch(() => {});
