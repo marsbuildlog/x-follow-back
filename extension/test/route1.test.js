@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 require('../src/shared/route1.js');
-const { pickDirectHeaders, buildRequest, headerSets, mergeVariables } = globalThis.RFRoute1;
+const { pickDirectHeaders, buildRequest, headerSets, mergeVariables, isTidRejectedFollow } = globalThis.RFRoute1;
 
 // 基于 2026-10 实测形状构造的 GET 形态 SearchTimeline 模板(s 含首见 variables/features/fieldToggles)
 const TPL_GET = {
@@ -122,4 +122,12 @@ test('mergeVariables: cursor 有值则带上(翻页)', () => {
 test('mergeVariables: v0 缺省也能构造(纯补丁)', () => {
   assert.deepEqual(mergeVariables(null, { a: 1, b: null }), { a: 1 });
   assert.deepEqual(mergeVariables(undefined, {}), {});
+});
+
+test('isTidRejectedFollow: 404 空 body 才算 tid 拒收', () => {
+  assert.equal(isTidRejectedFollow(404, ''), true);
+  assert.equal(isTidRejectedFollow(404, '   '), true);
+  assert.equal(isTidRejectedFollow(404, '{"errors":[]}'), false);
+  assert.equal(isTidRejectedFollow(403, ''), false);
+  assert.equal(isTidRejectedFollow(200, ''), false);
 });

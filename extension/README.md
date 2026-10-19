@@ -41,17 +41,19 @@ x.com 标签页
 ├── page-hook.js   (MAIN world, 先于页面脚本)
 │     hook fetch/XHR → 捕获页面发出的请求(含全部请求头):
 │       GraphQL (/i/api/graphql/...) 按操作名登记, v1.1 REST (/i/api/1.1/...) 按路径登记
-│     收到指令时用捕获的请求头模板重放:
-│       BlueVerifiedFollowers (GraphQL, 拉认证粉丝)
-│       /i/api/1.1/friendships/create.json (v1.1 REST, 回关, 仅替换 user_id)
+│     收到指令时用捕获的请求头模板重放(Route 1 失败时的兑底):
+│       BlueVerifiedFollowers / SearchTimeline 等 GraphQL
+│       /i/api/1.1/friendships/create.json (v1.1 REST, 回关)
 └── content.js     (隔离世界, 入口唯一文件)
       启动时 await import() 显式加载 shared/constants.js 与 shared/logic.js 并校验挂载
       (⚠ 不用 manifest 多文件列表保证顺序: Chrome 的多文件注入顺序不可靠, 出过 logic.js 未执行的确定性 bug)
       拉取器(生产者): 翻页拉认证粉丝(100/页, 上限8页) → 纯追加合并进队列(不碰已有条目)
         触发: 手动「更新列表」/ 打开页面且距上次拉取超过 autoFetchMin(默认30分钟)
+        传输: Route 1 直连优先, 结构性缺料才页面重放
         429 自行退避重试(同一页最多3次), 不影响回关循环
         已关注过滤: 只信列表自带 relationship_perspectives.following
       回关循环(消费者): 只消费 pending, 随机间隔3~8s 逐个关注
+        关注动作: Route 1 直连 create.json 优先, 传输失败才页面重放(业务响应不重放)
         失败处理: 429/88→不标失败, 按 reset 精确等待后重试同一人(连续3次才跳过); remaining=0→主动等重置不吃429
                   403+161→关注上限暂停+每小时探测重试+通知; 纯403→立即暂停(template-expired)+通知
                   请求层连续异常2次→暂停(error)+通知; 连续失败30min→暂停(stalled)+通知

@@ -33,6 +33,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
     return true;
   }
+  if (msg.cmd === 'route1-follow') {
+    // Phase 2 生产路径: create.json 直连; 传输失败返回 {error, transport:true} 供 content 兑底页面重放
+    withTimeout(route1Follow(msg.userId), 30_000, 'route1-follow')
+      .then(sendResponse)
+      .catch((e) => sendResponse({ error: String((e && e.message) || e), transport: true }));
+    return true;
+  }
   if (msg.cmd === 'route1-graphql') {
     // vars = 变量补丁(含 null 值删键语义, 见 RFRoute1.mergeVariables)
     route1Graphql(msg.op, msg.vars || {})
@@ -236,35 +243,78 @@ chrome.runtime.onInstalled.addListener(() => {
 // MV3 webRequest 纯旁听(不能改写); tid/authorization 是普通请求头, 不需要 extraHeaders。
 importScripts('shared/constants.js', 'shared/route1.js', 'shared/harvest.js', 'shared/tidpool.js');
 
-// ---------- 回关动作直连实验(Phase 2 闸门): create.json 能否脱离页面 ----------
-// 步骤: UserByScreenName 拿 user_id(需页面旁听过该模板) → create(净加一) → 立即 destroy(净零)。
+// ---------- 回关动作 Route 1(Phase 2): friendships/create.json 直连 ----------
+// 生产路径 route1Follow; 调试闸门 followProbe 复用同一 v11Call。
 // 变体: ①最小头(bearer+csrf, 无 tid) ②加池内最新 tid(跨路径——池里天然没有 create.json 的 tid)。
-// 结果决定: 回关是否还依赖页面重放(问题2) + 循环能否搬进后台(关掉所有 x.com 页也能跑)。
+// 业务响应(含 403/429)原样返回供 interpret; 仅传输失败(无 ct0/网络)标 transport 兑底页面重放。
+function parseRlHeaders(res) {
+  const rl = {};
+  for (const k of ['limit', 'remaining', 'reset']) {
+    const v = res.headers && res.headers.get('x-rate-limit-' + k);
+    if (v != null && v !== '') rl[k] = Number(v);
+  }
+  return rl;
+}
+
 async function v11Call(action, userId, tid) {
   const { [RF.KEY.bearer]: harvested } = await chrome.storage.local.get(RF.KEY.bearer);
   const auth = harvested || globalThis.RF.publicBearer;
   const ck = await chrome.cookies.get({ url: 'https://x.com/', name: 'ct0' });
-  if (!ck || !ck.value) return { error: '读不到 ct0 cookie' };
+  if (!ck || !ck.value) return { error: '读不到 ct0 cookie', transport: true };
   const headers = {
     authorization: auth,
     'x-csrf-token': ck.value,
     'content-type': 'application/x-www-form-urlencoded',
   };
   if (tid) headers['x-client-transaction-id'] = tid;
-  const res = await fetch('https://x.com/i/api/1.1/friendships/' + action + '.json', {
-    method: 'POST',
-    credentials: 'include',
-    headers,
-    body: 'user_id=' + encodeURIComponent(userId),
-  });
-  const body = await res.text();
-  return { status: res.status, ok: res.ok, body: body.slice(0, 200) };
+  let res, body;
+  try {
+    res = await fetch('https://x.com/i/api/1.1/friendships/' + action + '.json', {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: 'user_id=' + encodeURIComponent(userId),
+    });
+    body = await res.text();
+  } catch (e) {
+    return { error: '网络异常: ' + String((e && e.message) || e), transport: true };
+  }
+  return { status: res.status, ok: res.ok, body, rl: parseRlHeaders(res) };
+}
+
+// 生产: 关注一人。先无 tid, tid 拒收再试池内最新 tid; 传输失败返回 {error, transport:true}。
+async function route1Follow(userId) {
+  const id = String(userId || '').trim();
+  if (!id) return { error: '缺少 userId', transport: true };
+
+  const first = await v11Call('create', id, null);
+  if (first.transport || first.error) return { error: first.error || '直连失败', transport: true };
+
+  const rejectTid = globalThis.RFRoute1.isTidRejectedFollow(first.status, first.body);
+  if (!rejectTid) {
+    return { status: first.status, ok: first.ok, body: first.body, rl: first.rl, via: 'no-tid' };
+  }
+
+  const { [TID_KEY]: pool } = await chrome.storage.local.get(TID_KEY);
+  const tidEntry = (pool || []).slice().sort((a, b) => b.at - a.at)[0];
+  if (!tidEntry || !tidEntry.t) {
+    return { error: 'Route 1 tid 拒收且池空', transport: true, status: first.status };
+  }
+
+  const second = await v11Call('create', id, tidEntry.t);
+  if (second.transport || second.error) return { error: second.error || '直连失败', transport: true };
+  try {
+    const { [TID_KEY]: p2 } = await chrome.storage.local.get(TID_KEY);
+    await chrome.storage.local.set({
+      [TID_KEY]: globalThis.RFTidPool.markResult(p2 || [], tidEntry.t, tidEntry.p || '/i/api/1.1/friendships/create.json', true, Date.now()),
+    });
+  } catch {}
+  return { status: second.status, ok: second.ok, body: second.body, rl: second.rl, via: 'pool-tid' };
 }
 
 async function followProbe(handle) {
   const h = String(handle || '').trim().replace(/^@/, '');
   if (!/^[A-Za-z0-9_]{1,15}$/.test(h)) return { ok: false, error: 'handle 不合法' };
-  // 1. user_id: UserByScreenName 走 Route 1(模板需页面旁听过一次)
   const u = await route1Graphql('UserByScreenName', { screen_name: h });
   let userId = null;
   if (u && u.ok) {
@@ -273,7 +323,6 @@ async function followProbe(handle) {
   if (!userId) {
     return { ok: false, error: `拿不到 @${h} 的 user_id(${u && u.error ? u.error : 'HTTP ' + (u && u.status)})——先在 x.com 打开一次该用户的主页(让页面旁听到模板)再重试` };
   }
-  // 2. create→destroy, 两种头形态逐个试(成功即停; 429 桶热即停)
   const { [TID_KEY]: pool } = await chrome.storage.local.get(TID_KEY);
   const tidEntry = (pool || []).slice().sort((a, b) => b.at - a.at)[0];
   const attempts = [];
@@ -286,7 +335,7 @@ async function followProbe(handle) {
       a.destroy = d.status != null ? `HTTP ${d.status}` : d.error;
       a.netZero = d.ok;
     } else {
-      a.body = c.body;
+      a.body = (c.body || '').slice(0, 200);
     }
     attempts.push(a);
     if (a.netZero || c.status === 429) break;
@@ -297,8 +346,8 @@ async function followProbe(handle) {
     userId,
     attempts,
     verdict: win
-      ? `✅ 直连可用(${win.set})——回关可脱页, Phase 2 闸门通过`
-      : '❌ 无可用形态——回关暂留页面重放, 循环仍需页面宿主',
+      ? `✅ 直连可用(${win.set})——生产路径已切 Route 1, 传输失败才页面重放`
+      : '❌ 无可用形态——生产仍会试 Route 1, 失败兑底页面重放',
   };
 }
 

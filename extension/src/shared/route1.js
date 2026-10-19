@@ -62,5 +62,15 @@
     return out;
   }
 
-  globalThis.RFRoute1 = { ORIGIN, SKIP_HEADERS, pickDirectHeaders, buildRequest, headerSets, mergeVariables };
+  // create.json 无 tid / 坏 tid 时的拒收形态(ADR-0002): HTTP 404 + 空 body。
+  // 用于 Phase 2: 无 tid 失败后决定是否换池内 tid 再试(跨路径)。
+  function isTidRejectedFollow(status, body) {
+    if (status !== 404) return false;
+    return String(body || '').trim().length === 0;
+  }
+
+  globalThis.RFRoute1 = {
+    ORIGIN, SKIP_HEADERS, pickDirectHeaders, buildRequest, headerSets, mergeVariables,
+    isTidRejectedFollow,
+  };
 })();

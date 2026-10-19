@@ -343,14 +343,24 @@
     }
   }
 
-  // 回关: 重放页面自己的 v1.1 REST 请求(friendships/create.json), 仅替换 user_id
+  // 回关(Phase 2): Route 1 直连 create.json 优先; 仅传输失败才兑底页面重放(业务响应不重放, 防双关)
   async function followUser(userId) {
+    const uid = String(userId);
+    const r1 = await sendBg({ cmd: 'route1-follow', userId: uid });
+    // 拿到 HTTP 状态 = 业务权威应答(含 403/429), 不再重放
+    if (r1 && r1.status != null && !r1.transport) {
+      return { status: r1.status, ok: !!r1.ok, body: r1.body || '', rl: r1.rl || {}, via: r1.via || 'route1' };
+    }
+    // 传输失败 → 页面重放兑底(需本页捕获过 create.json 模板)
     const cap = await callPage('list-captured', {});
     const has = (cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API);
     if (!has) {
-      throw new Error('未捕获回关请求——请在本标签页的认证粉丝列表里点一次「回关」按钮(其他页面/标签页捕获不到)');
+      const why = (r1 && r1.error) ? `Route 1 失败(${r1.error})且` : '';
+      throw new Error(why + '未捕获回关请求——请在认证粉丝列表里点一次「回关」按钮刷新模板');
     }
-    return callPage('api', { path: FOLLOW_API, params: { user_id: String(userId) } });
+    await log(`关注 Route 1 传输失败, 回退页面重放: ${(r1 && r1.error) || '未知'}`);
+    const res = await callPage('api', { path: FOLLOW_API, params: { user_id: uid } });
+    return Object.assign({}, res, { via: 'page' });
   }
 
   // ============================================================
@@ -966,10 +976,11 @@
       await log('主动关注已登记运行(循环醒来后按回关优先接续)');
       return { ok: true, message: '已登记运行——循环醒来后自动接续(当前在限流等待)' };
     }
+    // Phase 2: 关注走 Route 1, 无模板也可开跑; 模板仅作传输失败兑底
     try {
       const cap = await callPage('list-captured', {});
       if (!(cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API)) {
-        return { ok: false, message: '首次使用: 请先在认证粉丝列表里点一次任意用户的「回关」按钮(模板只需学一次), 再点开始' };
+        await log('未捕获回关模板——关注走 Route 1 直连; 若直连失败需在认证粉丝列表点一次「回关」才能兑底');
       }
     } catch {}
     const t = await getAfTask(handle);
@@ -1061,12 +1072,12 @@
       await log('回关已登记运行(循环醒来后按回关优先接续)');
       return { ok: true, message: '已登记运行——循环醒来后自动接续(当前在限流等待)' };
     }
-    // 首次使用守卫: 回关模板未捕获时关注必然失败 → 引导先完成一次手动回关
+    // Phase 2: 关注走 Route 1, 无模板也可开跑; 模板仅作传输失败兑底
     // (拉取不受影响, 打开页面后观察器会自动补拉)
     try {
       const cap = await callPage('list-captured', {});
       if (!(cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API)) {
-        return { ok: false, message: '首次使用: 请先在认证粉丝列表里点一次任意用户的「回关」按钮, 再点开始回关' };
+        await log('未捕获回关模板——关注走 Route 1 直连; 若直连失败需在认证粉丝列表点一次「回关」才能兑底');
       }
     } catch {}
     const t = t0;
@@ -1193,7 +1204,7 @@
           const d = await getDaily(handle);
           d.followed++;
           await store.set(dailyKey(handle), d);
-          await log(`已关注 ${atName(current)}${src === 'af' ? '(主动)' : ''}, 今日 ${d.followed}`);
+          await log(`已关注 ${atName(current)}${src === 'af' ? '(主动)' : ''}${res.via === 'page' ? '(页面重放)' : '(Route 1)'}, 今日 ${d.followed}`);
           // 主动限流: 窗口次数耗尽时等到 reset 再发下一个, 避免吃 429
           const pw = windowExhaustedWaitMs(r, Date.now());
           if (pw > 0) {
@@ -1630,7 +1641,7 @@
       ${st.alert ? `<div class="rf-alert">回关模板已过期——请在认证粉丝列表页点一次「回关」刷新, 再点「恢复」</div>` : ''}
       ${panelMsg ? `<div class="rf-msg">${escHtml(panelMsg)}</div>` : ''}
       ${t.lastError ? `<div class="rf-err">最近错误: ${escHtml(t.lastError).slice(0, 160)}</div>` : ''}
-      <div class="rf-btns">${actionBtn}<button class="rf-btn ghost" data-act="af-search">抓取互关帖</button></div>
+      <div class="rf-btns">${actionBtn}<button class="rf-btn ghost" data-act="af-search">抓取互关帖</button><button class="rf-btn ghost" data-act="af-scan">扫描帖子</button></div>
       <div class="rf-keep">⏳ 保持本标签页开启: 扫描与关注都在此页面内运行, 关闭会暂停, 重新打开自动继续</div>
     `;
   }
@@ -1766,6 +1777,7 @@
           taskHandle.then((handle) => {
             if (act === 'start') return (tag ? startAfTask(handle) : startTask(handle)).then((r) => setPanelMsg(r.message || '已启动'));
             if (act === 'af-search') return runAfSearch(tag, handle).then((r) => setPanelMsg(r.message || String(r.ok)));
+            if (act === 'af-scan') return runAfScanBurst(handle).then((r) => setPanelMsg(r.message || String(r.ok)));
             if (act === 'refresh') return requestRefresh().then((r) => setPanelMsg(r.message || String(r.ok)));
             if (act === 'pause') return pauseTask(handle, 'manual').then(() => setPanelMsg('已暂停'));
             if (act === 'resume') return resumeTask(handle).then(() => setPanelMsg('已恢复'));
