@@ -793,7 +793,7 @@
       if (!n) { showOp(resultEl, '名单为空——先拉取未回关名单'); return; }
       const ok = confirm(
         `将对未回关名单中的 ${n} 人批量取关(全量, 非仅表格 ${MAX_ROWS} 行)。\n`
-        + '节奏与设置里的「关注间隔」相同, 可随时点「停止取关」。\n\n确定继续？'
+        + '每人间隔随机 50~60 秒, 可随时点「停止取关」。\n\n确定继续？'
       );
       if (!ok) { showOp(resultEl, '已取消'); return; }
     }

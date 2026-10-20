@@ -663,7 +663,9 @@
         handle, running: true, total, done: 0, ok: 0, fail: 0, skip: 0,
         current: null, ts: Date.now(),
       });
-      await log(`批量取关发车: ${total} 人, 间隔 ${settings.intervalMin}~${settings.intervalMax} 秒`);
+      const gapMin = AF.UNFOLLOW_GAP_MIN_S || 50;
+      const gapMax = AF.UNFOLLOW_GAP_MAX_S || 60;
+      await log(`批量取关发车: ${total} 人, 间隔 ${gapMin}~${gapMax} 秒随机`);
 
       for (const u of queue) {
         if (unfollowAbort) {
@@ -720,7 +722,7 @@
           current: u.screenName || u.userId, ts: Date.now(),
         });
         if (unfollowAbort || done >= total) break;
-        const gap = randInt(settings.intervalMin, settings.intervalMax) * 1000;
+        const gap = randInt(gapMin, gapMax) * 1000;
         await sleepSegments(gap);
       }
 
@@ -1165,7 +1167,7 @@
         if (fetchingDiff) return { ok: false, message: '正在拉取名单, 请等拉取完成再取关' };
         if (!h) return { ok: false, message: '未识别到登录账号——点就绪清单打开 x.com 完成识别' };
         runDiffUnfollow().catch((e) => log(`批量取关异常: ${e}`));
-        return { ok: true, message: '批量取关已发车——进度见未回关名单状态行与日志(按关注间隔节奏)' };
+        return { ok: true, message: '批量取关已发车——进度见未回关名单状态行与日志(约50~60秒/人)' };
       case 'diff-unfollow-stop':
         if (!unfollowingDiff) return { ok: false, message: '当前没有在跑的批量取关' };
         unfollowAbort = true;

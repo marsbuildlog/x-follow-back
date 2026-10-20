@@ -62,6 +62,9 @@ const RF = {
     SEARCH_MIN_GAP_MS: 30 * 1000, // 搜索/扫描发射节奏兼底: 50次/15分钟桶 ≈ 18s/发, 30s/发给页面自己的搜索留余量
     // 未回关名单 Following 翻页: 同路径 tid 冷却 70s; 过快会烧穿池, 池见底另等 TID_COOLDOWN 重试。
     FOLLOWING_MIN_GAP_MS: 5 * 1000,
+    // 批量取关间隔(秒, 含端点): 与关注循环设置无关, 故意拉慢降低风险
+    UNFOLLOW_GAP_MIN_S: 50,
+    UNFOLLOW_GAP_MAX_S: 60,
     AUTO_SEARCH_COOLDOWN_MS: 60 * 60 * 1000, // 池子断供自动补池的冷却(2026-10-12): 抓过一轮后至少隔1小时再补——
                              // 搜索常只回旧帖(0 新帖), 无冷却会每 tick(30s)空烧限流桶
     POOL_MIN: 10,            // 池子存活帖(未扫完 scanCount<SCAN_MAX)低于此数即视为断供: 自动补池不等"无到期帖"——
