@@ -791,9 +791,15 @@
       const diff = (await chrome.storage.local.get(key))[key];
       const n = ((diff && diff.users) || []).length;
       if (!n) { showOp(resultEl, '名单为空——先拉取未回关名单'); return; }
+      const { rf_settings: s } = await chrome.storage.local.get('rf_settings');
+      const v = { ...RF.DEFAULTS, ...(s || {}) };
+      const floor = (RF.AF && RF.AF.UNFOLLOW_GAP_FLOOR_S) || 5;
+      let lo = Math.max(floor, Math.round(+v.unfollowIntervalMin) || RF.DEFAULTS.unfollowIntervalMin);
+      let hi = Math.max(floor, Math.round(+v.unfollowIntervalMax) || RF.DEFAULTS.unfollowIntervalMax);
+      if (lo > hi) { const t = lo; lo = hi; hi = t; }
       const ok = confirm(
         `将对未回关名单中的 ${n} 人批量取关(全量, 非仅表格 ${MAX_ROWS} 行)。\n`
-        + '每人间隔随机 50~60 秒, 可随时点「停止取关」。\n\n确定继续？'
+        + `每人间隔随机 ${lo}~${hi} 秒(设置可改), 可随时点「停止取关」。\n\n确定继续？`
       );
       if (!ok) { showOp(resultEl, '已取消'); return; }
     }
@@ -947,15 +953,44 @@
     if (!Number.isFinite(n)) return RF.DEFAULTS.humanCooldownMin;
     return Math.max(0, Math.min(10, n));
   }
+  // 关注/取关间隔: 两端都不低于 floor 秒; 若填反则对调
+  function clampGapInterval(minRaw, maxRaw, defMin, defMax, floor) {
+    let lo = Math.round(+minRaw);
+    let hi = Math.round(+maxRaw);
+    if (!Number.isFinite(lo)) lo = defMin;
+    if (!Number.isFinite(hi)) hi = defMax;
+    lo = Math.max(floor, lo);
+    hi = Math.max(floor, hi);
+    if (lo > hi) { const t = lo; lo = hi; hi = t; }
+    return { min: lo, max: hi };
+  }
+  function clampFollowInterval(minRaw, maxRaw) {
+    const floor = (RF.AF && RF.AF.FOLLOW_GAP_FLOOR_S) || 5;
+    const r = clampGapInterval(minRaw, maxRaw, RF.DEFAULTS.intervalMin, RF.DEFAULTS.intervalMax, floor);
+    return { intervalMin: r.min, intervalMax: r.max };
+  }
+  function clampUnfollowInterval(minRaw, maxRaw) {
+    const floor = (RF.AF && RF.AF.UNFOLLOW_GAP_FLOOR_S) || 5;
+    const r = clampGapInterval(minRaw, maxRaw, RF.DEFAULTS.unfollowIntervalMin, RF.DEFAULTS.unfollowIntervalMax, floor);
+    return { unfollowIntervalMin: r.min, unfollowIntervalMax: r.max };
+  }
   async function saveSettings() {
     const { rf_settings: prev } = await chrome.storage.local.get('rf_settings');
     const humanCooldownMin = clampHumanCooldownMin($('s-humanCooldownMin').value);
     $('s-humanCooldownMin').value = humanCooldownMin;
+    const fol = clampFollowInterval($('s-intervalMin').value, $('s-intervalMax').value);
+    $('s-intervalMin').value = fol.intervalMin;
+    $('s-intervalMax').value = fol.intervalMax;
+    const uf = clampUnfollowInterval($('s-unfollowIntervalMin').value, $('s-unfollowIntervalMax').value);
+    $('s-unfollowIntervalMin').value = uf.unfollowIntervalMin;
+    $('s-unfollowIntervalMax').value = uf.unfollowIntervalMax;
     await chrome.storage.local.set({
       rf_settings: {
         ...(prev || {}),
-        intervalMin: +$('s-intervalMin').value || RF.DEFAULTS.intervalMin,
-        intervalMax: +$('s-intervalMax').value || RF.DEFAULTS.intervalMax,
+        intervalMin: fol.intervalMin,
+        intervalMax: fol.intervalMax,
+        unfollowIntervalMin: uf.unfollowIntervalMin,
+        unfollowIntervalMax: uf.unfollowIntervalMax,
         autoFetchMin: +$('s-autoFetchMin').value || RF.DEFAULTS.autoFetchMin,
         humanCooldownMin,
         tags: pendingTags,
@@ -968,8 +1003,12 @@
   async function loadSettings() {
     const { rf_settings: s } = await chrome.storage.local.get('rf_settings');
     const v = { ...RF.DEFAULTS, ...(s || {}) };
-    $('s-intervalMin').value = v.intervalMin;
-    $('s-intervalMax').value = v.intervalMax;
+    const fol = clampFollowInterval(v.intervalMin, v.intervalMax);
+    $('s-intervalMin').value = fol.intervalMin;
+    $('s-intervalMax').value = fol.intervalMax;
+    const uf = clampUnfollowInterval(v.unfollowIntervalMin, v.unfollowIntervalMax);
+    $('s-unfollowIntervalMin').value = uf.unfollowIntervalMin;
+    $('s-unfollowIntervalMax').value = uf.unfollowIntervalMax;
     $('s-autoFetchMin').value = v.autoFetchMin;
     $('s-humanCooldownMin').value = clampHumanCooldownMin(v.humanCooldownMin);
     pendingTags = (v.tags || []).map(normalizeTag).filter(Boolean);
@@ -982,7 +1021,7 @@
   }
   $('btn-add-tag').onclick = addTagFromInput;
   $('s-tag-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') addTagFromInput(); });
-  ['s-intervalMin', 's-intervalMax', 's-autoFetchMin', 's-humanCooldownMin'].forEach((id) => {
+  ['s-intervalMin', 's-intervalMax', 's-unfollowIntervalMin', 's-unfollowIntervalMax', 's-autoFetchMin', 's-humanCooldownMin'].forEach((id) => {
     $(id).addEventListener('change', scheduleSave);
   });
 

@@ -195,7 +195,7 @@
       </div>
       <div class="hint" id="diff-exempt-summary"></div>
     </div>
-    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取在控制台 Route 1 直连执行(保持控制台打开), 页间约 5 秒节奏(防 tid 池烧穿), 大账号仍可能要几分钟。表格最多展示 200 行, CSV 导出当前 Tab 全量。「批量取关」只处理未回关名单, 每人间隔随机 50~60 秒。「加入免取关」会移出未回关名单并记住, 下次拉取也不会再进来。「移除」只从免取关名单删掉, 不会立刻加回未回关名单。</div>
+    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取在控制台 Route 1 直连执行(保持控制台打开), 页间约 5 秒节奏(防 tid 池烧穿), 大账号仍可能要几分钟。表格最多展示 200 行, CSV 导出当前 Tab 全量。「批量取关」只处理未回关名单, 间隔见设置「批量取关间隔」。「加入免取关」会移出未回关名单并记住, 下次拉取也不会再进来。「移除」只从免取关名单删掉, 不会立刻加回未回关名单。</div>
   </div>
 
   <!-- 设置 -->
@@ -203,8 +203,12 @@
     <h2>设置 <span class="hint">修改即自动保存</span></h2>
     <section>
       <div class="set">
-        <div class="set-line">关注间隔 <input type="number" id="s-intervalMin" /> ~ <input type="number" id="s-intervalMax" /> 秒</div>
-        <div class="hint">每次回关之间随机等待这个区间, 模拟人工节奏(默认 3~8 秒)</div>
+        <div class="set-line">关注间隔 <input type="number" id="s-intervalMin" min="5" /> ~ <input type="number" id="s-intervalMax" min="5" /> 秒</div>
+        <div class="hint">回关/主动关注时每人随机等待这个区间; 最低不低于 5 秒(默认 5~10 秒)</div>
+      </div>
+      <div class="set">
+        <div class="set-line">批量取关间隔 <input type="number" id="s-unfollowIntervalMin" min="5" /> ~ <input type="number" id="s-unfollowIntervalMax" min="5" /> 秒</div>
+        <div class="hint">未回关名单批量取关时每人随机等待这个区间; 最低不低于 5 秒(默认 50~60 秒)</div>
       </div>
       <div class="set">
         <div class="set-line">人为冷却 <input type="number" id="s-humanCooldownMin" min="0" max="10" step="1" /> 分钟</div>

@@ -1167,9 +1167,13 @@
           item = picked.item;
         }
 
-        // 随机间隔(模拟人工)
+        // 随机间隔(模拟人工); 硬底 FOLLOW_GAP_FLOOR_S
         const settings = await getSettings();
-        const delayMs = randInt(settings.intervalMin, settings.intervalMax) * 1000;
+        const floor = AF.FOLLOW_GAP_FLOOR_S || 5;
+        let gapLo = Math.max(floor, Math.round(+settings.intervalMin) || RF.DEFAULTS.intervalMin);
+        let gapHi = Math.max(floor, Math.round(+settings.intervalMax) || RF.DEFAULTS.intervalMax);
+        if (gapLo > gapHi) { const t = gapLo; gapLo = gapHi; gapHi = t; }
+        const delayMs = randInt(gapLo, gapHi) * 1000;
         if (!(await sleepInterruptible(delayMs, handle))) break;
 
         // 重读 task 后旧 item 引用已失效, 按 userId 重新定位。

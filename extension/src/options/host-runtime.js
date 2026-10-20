@@ -657,14 +657,16 @@
         return { ok: false, message: '名单为空——先拉取未回关名单(免取关名单中的人不会被取关)' };
       }
       const settings = await getSettings();
+      const floor = AF.UNFOLLOW_GAP_FLOOR_S || 5;
+      let gapMin = Math.max(floor, Math.round(+settings.unfollowIntervalMin) || RF.DEFAULTS.unfollowIntervalMin);
+      let gapMax = Math.max(floor, Math.round(+settings.unfollowIntervalMax) || RF.DEFAULTS.unfollowIntervalMax);
+      if (gapMin > gapMax) { const t = gapMin; gapMin = gapMax; gapMax = t; }
       const total = queue.length;
       let done = 0, okN = 0, failN = 0, skipN = 0;
       await store.set(K.diffUnfollowProgress, {
         handle, running: true, total, done: 0, ok: 0, fail: 0, skip: 0,
         current: null, ts: Date.now(),
       });
-      const gapMin = AF.UNFOLLOW_GAP_MIN_S || 50;
-      const gapMax = AF.UNFOLLOW_GAP_MAX_S || 60;
       await log(`批量取关发车: ${total} 人, 间隔 ${gapMin}~${gapMax} 秒随机`);
 
       for (const u of queue) {
@@ -970,7 +972,11 @@
           item = picked.item;
         }
         const settings = await getSettings();
-        const delayMs = randInt(settings.intervalMin, settings.intervalMax) * 1000;
+        const floor = AF.FOLLOW_GAP_FLOOR_S || 5;
+        let gapLo = Math.max(floor, Math.round(+settings.intervalMin) || RF.DEFAULTS.intervalMin);
+        let gapHi = Math.max(floor, Math.round(+settings.intervalMax) || RF.DEFAULTS.intervalMax);
+        if (gapLo > gapHi) { const t = gapLo; gapLo = gapHi; gapHi = t; }
+        const delayMs = randInt(gapLo, gapHi) * 1000;
         if (!(await sleepInterruptible(delayMs, handle))) break;
         task = await io[src].get(handle);
         if (task.state !== 'running') break;
@@ -1167,7 +1173,7 @@
         if (fetchingDiff) return { ok: false, message: '正在拉取名单, 请等拉取完成再取关' };
         if (!h) return { ok: false, message: '未识别到登录账号——点就绪清单打开 x.com 完成识别' };
         runDiffUnfollow().catch((e) => log(`批量取关异常: ${e}`));
-        return { ok: true, message: '批量取关已发车——进度见未回关名单状态行与日志(约50~60秒/人)' };
+        return { ok: true, message: '批量取关已发车——进度见未回关名单状态行与日志(间隔见设置)' };
       case 'diff-unfollow-stop':
         if (!unfollowingDiff) return { ok: false, message: '当前没有在跑的批量取关' };
         unfollowAbort = true;
