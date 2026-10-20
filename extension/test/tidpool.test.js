@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 require('../src/shared/tidpool.js');
-const { add, pick, pickCrossPath, markResult, prune, shouldHarvest, CAP } = globalThis.RFTidPool;
+const { add, pick, pickCrossPath, markResult, prune, shouldHarvest, CAP, CAP_PER_PATH } = globalThis.RFTidPool;
 
 const T1 = 'a'.repeat(94);
 const T2 = 'b'.repeat(94);
@@ -56,11 +56,32 @@ test('add/prune: 入库时清掉池内旧噪声', () => {
   assert.equal(next.every((e) => shouldHarvest(e.p)), true);
 });
 
-test('add: 容量截断, 保留最新', () => {
+test('add: 同路径最多 CAP_PER_PATH, 淘汰更早加入的', () => {
   let pool = [];
-  for (let i = 0; i < CAP + 5; i++) pool = add(pool, String(i).padEnd(94, 'x'), SEARCH, i);
-  assert.equal(pool.length, CAP);
-  assert.equal(pool[0].at, CAP + 4); // 最新
+  for (let i = 0; i < CAP_PER_PATH + 5; i++) pool = add(pool, String(i).padEnd(94, 'x'), SEARCH, i);
+  assert.equal(pool.length, CAP_PER_PATH);
+  assert.equal(pool[0].at, CAP_PER_PATH + 4); // 最新
+  assert.equal(pool[CAP_PER_PATH - 1].at, 5); // 最早仍保留的(更早的 0..4 已淘汰)
+});
+
+test('add: 不同路径各自独立计 CAP_PER_PATH', () => {
+  let pool = [];
+  for (let i = 0; i < CAP_PER_PATH; i++) pool = add(pool, String(i).padEnd(94, 's'), SEARCH, i);
+  for (let i = 0; i < CAP_PER_PATH; i++) pool = add(pool, String(i).padEnd(94, 'd'), DETAIL, 1000 + i);
+  assert.equal(pool.filter((e) => e.p === SEARCH).length, CAP_PER_PATH);
+  assert.equal(pool.filter((e) => e.p === DETAIL).length, CAP_PER_PATH);
+  assert.equal(pool.length, CAP_PER_PATH * 2);
+  assert.ok(pool.length <= CAP);
+});
+
+test('prune: 同路径超量时裁到 CAP_PER_PATH', () => {
+  const bloated = [];
+  for (let i = 0; i < CAP_PER_PATH + 10; i++) {
+    bloated.push({ t: String(i).padEnd(94, 'x'), p: SEARCH, at: 1000 - i }); // 最新在前
+  }
+  const out = prune(bloated);
+  assert.equal(out.length, CAP_PER_PATH);
+  assert.equal(out[0].at, 1000);
 });
 
 test('pick: 捕获后冷却期内不可用(页面刚用过), 过期可用', () => {

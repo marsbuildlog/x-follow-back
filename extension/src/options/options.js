@@ -169,7 +169,7 @@
     const tbody = $('tid-pool-table') && $('tid-pool-table').querySelector('tbody');
     if (!sumEl || !tbody) return;
     const key = (RF.KEY && RF.KEY.tidPool) || 'rf_tid_pool';
-    const cap = (globalThis.RFTidPool && RFTidPool.CAP) || 512;
+    const perPath = (globalThis.RFTidPool && RFTidPool.CAP_PER_PATH) || 30;
     let pool = [];
     try {
       const r = await chrome.storage.local.get(key);
@@ -194,8 +194,8 @@
       .sort((a, b) => b[1].total - a[1].total)
       .map(([k, v]) => `${k} ${v.ready}/${v.total} 就绪`);
     sumEl.textContent = pool.length
-      ? `共 ${pool.length}/${cap} · ${parts.join(' · ')}`
-      : `空池 0/${cap}——刷 x.com 或点「手动供血」入库`;
+      ? `共 ${pool.length} · 同路径上限 ${perPath} · ${parts.join(' · ')}`
+      : `空池——刷 x.com 或点「手动供血」入库(同路径最多 ${perPath} 条)`;
     tbody.innerHTML = pool.map((e) => {
       const base = Math.max(e.at || 0, e.ok || 0);
       const left = Math.max(0, TID_CD_MS - (now - base));
