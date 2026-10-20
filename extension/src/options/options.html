@@ -57,6 +57,16 @@
     .set { margin-bottom: 14px; }
     .set-line { display: flex; align-items: center; gap: 6px; font-size: 13px; }
     input[type=number] { width: 80px; padding: 4px 6px; }
+    /* 未回关页: 可展开使用提示 */
+    .tips-panel { margin: 0 0 10px; border: 1px solid #e1e8ed; border-radius: 8px; background: #f7f9f9; font-size: 12px; color: #536471; }
+    .tips-panel > summary { cursor: pointer; padding: 8px 12px; font-weight: 600; color: #0f1419; list-style: none; user-select: none; }
+    .tips-panel > summary::-webkit-details-marker { display: none; }
+    .tips-panel > summary::before { content: '▸ '; color: #1d9bf0; }
+    .tips-panel[open] > summary::before { content: '▾ '; }
+    .tips-panel .tips-body { padding: 0 12px 10px; }
+    .tips-panel ul { margin: 0; padding-left: 1.2em; }
+    .tips-panel li { margin: 4px 0; line-height: 1.55; }
+    .warn-banner { margin: 0 0 10px; padding: 8px 10px; background: #fff8e6; border: 1px solid #f0e0a8; border-radius: 8px; color: #6b5a1e; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -165,6 +175,23 @@
   <!-- 未回关名单: 我关注了但对方没关注我 -->
   <div class="view" id="view-notback">
     <h2>未回关名单 <span class="hint">我关注了、但对方没关注我的用户</span></h2>
+    <div class="warn-banner">
+      若刚跑过<strong>主动关注</strong>，建议不要立刻拉取「未回关名单」。对方可能还没来得及回关；名单会把这些人算进去，接着批量取关就等于刚关注完又取消。
+    </div>
+    <details class="tips-panel">
+      <summary>使用提示</summary>
+      <div class="tips-body">
+        <ul>
+          <li><b>首次使用</b>：先打开一次自己的 <code>x.com/账号/following</code> 并等加载完（捕获模板），再点「拉取名单」。</li>
+          <li><b>拉取</b>：在控制台执行，请保持本页打开；页间约 5 秒节奏，大账号可能要几分钟。</li>
+          <li><b>表格</b>：最多展示 200 行；「导出 CSV」导出当前 Tab 全量。</li>
+          <li><b>批量取关</b>：只处理「未回关名单」Tab；间隔见设置「批量取关间隔」。</li>
+          <li><b>加入免取关</b>：移出未回关名单并记住，下次拉取也不会再进来。</li>
+          <li><b>免取关里「移除」</b>：只离开免取关名单，不会立刻加回未回关。</li>
+          <li><b>固定保护</b>：@marsbuildlog 不会进未回关名单，并自动进免取关（不可移除）。</li>
+        </ul>
+      </div>
+    </details>
     <section><span id="diff-state" class="hint"></span></section>
     <section class="row" style="margin:10px 0">
       <button id="btn-diff-fetch" data-taskop="diff-fetch">拉取名单</button>
@@ -195,7 +222,6 @@
       </div>
       <div class="hint" id="diff-exempt-summary"></div>
     </div>
-    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取在控制台 Route 1 直连执行(保持控制台打开), 页间约 5 秒节奏(防 tid 池烧穿), 大账号仍可能要几分钟。表格最多展示 200 行, CSV 导出当前 Tab 全量。「批量取关」只处理未回关名单, 间隔见设置「批量取关间隔」。「加入免取关」会移出未回关名单并记住, 下次拉取也不会再进来。「移除」只从免取关名单删掉, 不会立刻加回未回关名单。@marsbuildlog 为固定保护: 不会出现在未回关名单, 并自动进免取关(不可移除)。</div>
   </div>
 
   <!-- 设置 -->
