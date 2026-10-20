@@ -11,7 +11,10 @@
     'template-expired': '模板过期', error: '连续异常',
   };
   const MAX_ROWS = 200; // 表格单次最多渲染行数(防大账号卡死页面)
-  const isDev = !chrome.runtime.getManifest().update_url;
+  const manifest = chrome.runtime.getManifest();
+  const isDev = !manifest.update_url;
+  const verEl = $('ext-version');
+  if (verEl && manifest.version) verEl.textContent = 'v' + manifest.version;
 
   let curView = 'dashboard';
   let curTab = 'todo';      // 回关队列子 tab: todo | done

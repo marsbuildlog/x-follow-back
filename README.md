@@ -15,7 +15,7 @@
 
 ## 🚀 安装与使用
 
-参考:[how2use.md](docs/how2use.md)
+参考:[使用说明索引](docs/how2use-index.md)
 
 ## 📦 打包发布
 
