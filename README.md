@@ -17,13 +17,25 @@
 
 参考:[使用说明索引](docs/how2use-index.md)
 
-## 📦 打包发布
+## 📦 打包与发版
+
+仅打安装包(读 `extension/manifest.json` 版本号):
 
 ```bash
-npm run build
+pnpm build
 ```
 
-自动读取 `extension/manifest.json` 的版本号,将插件打包为 `releases/x-follow-back-v{version}.zip`(排除 `test/`),可直接发给他人加载。
+产出 `releases/x-follow-back-v{version}.zip`(排除 `test/`)。
+
+完整发版(改版本 → 测试 → 打包 → commit/tag/push → GitHub Release):
+
+```bash
+pnpm release 0.9.0              # dry-run: 检查 + 生成发版说明草稿(若尚无)
+# 编辑 releases/release-notes-v0.9.0.md
+pnpm release 0.9.0 --execute    # 真正发版(需在干净的 main 上, 且远端无同名 tag)
+```
+
+也支持 `pnpm release patch|minor|major`。说明文档(how2use)需自行维护, 脚本不改。
 
 ## 🔧 工作原理
 
