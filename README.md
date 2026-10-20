@@ -37,6 +37,8 @@ pnpm release 0.9.0 --execute    # 真正发版(需在干净的 main 上, 且远�
 
 也支持 `pnpm release patch|minor|major`。说明文档(how2use)需自行维护, 脚本不改。
 
+注意: `git push` 与 `gh` 可能不是同一 GitHub 账号(例如 SSH 主机别名推 marsbuildlog, 而 `gh` 激活的是别的号)。发版前请 `gh auth switch --user marsbuildlog`, 确保对仓库有 push 权限。
+
 ## 🔧 工作原理
 
 ```

@@ -90,6 +90,43 @@ function assertClean() {
   }
 }
 
+// git push 可能走 SSH 主机别名(如 github.com-mars→marsbuildlog),
+// 而 gh 用的是「当前激活」的 HTTPS token——二者不是同一账号时, create release 会 404。
+function assertGhCanRelease() {
+  let login = '';
+  try {
+    login = execFileSync('gh', ['api', 'user', '--jq', '.login'], { cwd: root, encoding: 'utf8' }).trim();
+  } catch {
+    die('gh 未登录或不可用——请先: gh auth login\n若本机有多账号: gh auth switch --user <有推送权限的账号>');
+  }
+  let nwo = '';
+  try {
+    nwo = execFileSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], {
+      cwd: root, encoding: 'utf8',
+    }).trim();
+  } catch {
+    die('gh 无法识别当前仓库——请在仓库根目录运行, 或: gh repo set-default marsbuildlog/x-follow-back');
+  }
+  let push = false;
+  try {
+    const perms = execFileSync('gh', ['api', `repos/${nwo}`, '--jq', '.permissions.push'], {
+      cwd: root, encoding: 'utf8',
+    }).trim();
+    push = perms === 'true';
+  } catch {
+    die(`gh 账号 @${login} 无法读取 ${nwo} 权限(常被当成 404)\n请切换到有权限的账号: gh auth switch --user marsbuildlog`);
+  }
+  if (!push) {
+    die(
+      `gh 当前账号 @${login} 对 ${nwo} 没有 push 权限, 无法创建 GitHub Release\n`
+      + `git 推送可能已用 SSH 另一账号成功, 但 gh 不共用那套密钥\n`
+      + `请执行: gh auth switch --user marsbuildlog\n`
+      + `然后再跑发版(若 tag 已推上, 只需补: gh release create …)`
+    );
+  }
+  console.log(`\n✓ gh 账号 @${login} 对 ${nwo} 有 push 权限`);
+}
+
 function tagName(ver) {
   return `v${ver}`;
 }
@@ -213,6 +250,7 @@ function main() {
 
   assertMain();
   assertClean();
+  assertGhCanRelease();
   fetchAndAssertTagFree(ver);
 
   if (!execute) {
@@ -248,16 +286,26 @@ function main() {
   run(`git push origin ${tagName(ver)}`);
 
   const title = titleFromNotes(notesFile);
-  console.log(`\n→ gh release create ${tagName(ver)}`);
-  execFileSync('gh', [
-    'release', 'create', tagName(ver),
-    '--title', title,
-    '--notes-file', notesFile,
-    zipPath(ver),
-  ], { cwd: root, stdio: 'inherit' });
+  const tag = tagName(ver);
+  console.log(`\n→ gh release create ${tag}`);
+  try {
+    execFileSync('gh', [
+      'release', 'create', tag,
+      '--title', title,
+      '--notes-file', notesFile,
+      zipPath(ver),
+    ], { cwd: root, stdio: 'inherit' });
+  } catch {
+    die(
+      `gh release create 失败(tag ${tag} 可能已推到远端)\n`
+      + `先确认账号: gh auth status  (需要仓库 owner/push 权限, 常用: gh auth switch --user marsbuildlog)\n`
+      + `再手工补发:\n`
+      + `  gh release create ${tag} --title ${JSON.stringify(title)} --notes-file ${notesFile} ${zipPath(ver)}`
+    );
+  }
 
   console.log(`
-✅ 发版完成: ${tagName(ver)}
+✅ 发版完成: ${tag}
    安装包已上传到 GitHub Release。
    若中途曾失败, 请对照上方日志看卡在哪一步(脚本不自动回滚)。
 `);
