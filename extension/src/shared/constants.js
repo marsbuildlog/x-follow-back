@@ -33,6 +33,7 @@ const RF = {
     intervalMax: 10,      // 关注间隔随机区间上限(秒)
     unfollowIntervalMin: 50, // 批量取关间隔随机下限(秒, 硬底 5)
     unfollowIntervalMax: 60, // 批量取关间隔随机上限(秒)
+    fetchFollowersMaxPages: 8, // 回关列表(认证粉丝)单次最多翻页数(2–1000); 遇空页/无游标仍提前停
     stallMin: 30,         // 持续失败多少分钟判定为限流并暂停
     autoResumeMin: 60,    // 暂停后每隔多少分钟自动尝试恢复
     dailyLimitRetryMin: 60, // 关注上限(161)后每隔多少分钟自动探测重试(X 按 24h 滚动窗口重置, 与本地 0 点无关)
@@ -41,6 +42,11 @@ const RF = {
     autoFetchMin: 30,     // 自动拉取认证粉丝间隔(分钟, 手动拉取后重新计时)
     tags: ['蓝V互关'],    // 互关标签默认内置; Options 可增删(空则回落此默认)
   },
+  // 回关列表翻页上限硬范围(设置项 fetchFollowersMaxPages)
+  FETCH_FOLLOWERS_PAGES_MIN: 2,
+  FETCH_FOLLOWERS_PAGES_MAX: 1000,
+  // 固定保护账号(screen_name, 大小写不敏感): 永不写入未回关名单; 并自动进免取关(不可移除), 批量取关也会跳过
+  DIFF_EXEMPT_ALWAYS: ['marsbuildlog'],
   // 主动关注(蓝V互关)业务参数——产品决策全部写死为常量, 不进配置页(ADR-0001 语境)
   AF: {
     SEARCH_MAX_PAGES: 3,     // 搜索阶段每轮翻页数(决策链: 10→4→1; 2026-10-19 用户改回 3——约 60 帖/轮补池)

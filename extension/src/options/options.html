@@ -195,7 +195,7 @@
       </div>
       <div class="hint" id="diff-exempt-summary"></div>
     </div>
-    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取在控制台 Route 1 直连执行(保持控制台打开), 页间约 5 秒节奏(防 tid 池烧穿), 大账号仍可能要几分钟。表格最多展示 200 行, CSV 导出当前 Tab 全量。「批量取关」只处理未回关名单, 间隔见设置「批量取关间隔」。「加入免取关」会移出未回关名单并记住, 下次拉取也不会再进来。「移除」只从免取关名单删掉, 不会立刻加回未回关名单。</div>
+    <div class="hint">首次使用: 先打开一次自己的 x.com/账号/following 页面并等加载完(捕获模板), 再点「拉取名单」。拉取在控制台 Route 1 直连执行(保持控制台打开), 页间约 5 秒节奏(防 tid 池烧穿), 大账号仍可能要几分钟。表格最多展示 200 行, CSV 导出当前 Tab 全量。「批量取关」只处理未回关名单, 间隔见设置「批量取关间隔」。「加入免取关」会移出未回关名单并记住, 下次拉取也不会再进来。「移除」只从免取关名单删掉, 不会立刻加回未回关名单。@marsbuildlog 为固定保护: 不会出现在未回关名单, 并自动进免取关(不可移除)。</div>
   </div>
 
   <!-- 设置 -->
@@ -217,6 +217,10 @@
       <div class="set">
         <div class="set-line">自动拉取间隔 <input type="number" id="s-autoFetchMin" /> 分钟</div>
         <div class="hint">打开认证粉丝页且距上次拉取超过该时长时自动补拉新粉; 点「更新列表」会重新计时(默认 30 分钟)</div>
+      </div>
+      <div class="set">
+        <div class="set-line">回关列表最多拉 <input type="number" id="s-fetchFollowersMaxPages" min="2" max="1000" /> 页</div>
+        <div class="hint">每页约 100 人; 默认 8(约 800 人)。到上限或接口已无数据(空页/无游标)即停, 范围 2～1000</div>
       </div>
       <div class="set">
         <div class="set-line">互关标签(蓝V互关)

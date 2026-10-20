@@ -110,6 +110,9 @@
       diffp = r[RF.KEY.diffProgress] || null;
       difu = r[RF.KEY.diffUnfollowProgress] || null;
       dife = r[RF.KEY.diffExempt + ':' + h] || null;
+      // 固定保护(@marsbuildlog): 进免取关, 并从已有未回关名单剔掉(旧数据也清)
+      dife = await ensureAlwaysExemptInOptions(h, dife);
+      diff = await scrubAlwaysFromDiffList(h, diff);
     }
     renderFbCard(h, fb, daily, fp, tab);
     renderAfCard(h, af, tab, afp, afsp);
@@ -607,26 +610,85 @@
   }
   let diffRatioSort = 'asc'; // null | 'desc' | 'asc'；默认关注/粉丝从小到大
   let diffListTab = 'list'; // list | exempt
+  function alwaysExemptHandlesOpt() {
+    return (RF.DIFF_EXEMPT_ALWAYS || []).map((s) => String(s || '').replace(/^@/, '').trim().toLowerCase()).filter(Boolean);
+  }
+  function isPinnedExemptUser(u) {
+    if (!u) return false;
+    if (u.pinned) return true;
+    const sn = String(u.screenName || '').replace(/^@/, '').trim().toLowerCase();
+    return !!(sn && alwaysExemptHandlesOpt().includes(sn));
+  }
+  // 从未回关名单剔除固定保护账号(旧拉取结果里可能还有)
+  async function scrubAlwaysFromDiffList(ownerHandle, diff) {
+    if (!ownerHandle || !diff || !Array.isArray(diff.users)) return diff;
+    const always = new Set(alwaysExemptHandlesOpt());
+    if (!always.size) return diff;
+    const users = diff.users.filter((u) => !always.has(String(u.screenName || '').toLowerCase()));
+    if (users.length === diff.users.length) return diff;
+    const next = Object.assign({}, diff, { users, notBackCount: users.length });
+    await chrome.storage.local.set({ [RF.KEY.diff + ':' + ownerHandle]: next });
+    return next;
+  }
+  // 把 DIFF_EXEMPT_ALWAYS(@marsbuildlog 等)写入免取关; 已一致则原样返回
+  async function ensureAlwaysExemptInOptions(ownerHandle, dife) {
+    if (!ownerHandle) return dife;
+    const wants = alwaysExemptHandlesOpt();
+    if (!wants.length) return dife;
+    const users = ((dife && dife.users) || []).slice();
+    let changed = false;
+    for (const sn of wants) {
+      const idx = users.findIndex((u) => String(u.screenName || '').toLowerCase() === sn);
+      if (idx >= 0 && users[idx].pinned && String(users[idx].screenName || '').toLowerCase() === sn) continue;
+      const prev = idx >= 0 ? users[idx] : null;
+      const entry = {
+        userId: (prev && prev.userId) || '',
+        screenName: (prev && prev.screenName) || sn,
+        name: (prev && prev.name) || sn,
+        description: (prev && prev.description) || '',
+        followersCount: (prev && prev.followersCount) ?? 0,
+        friendsCount: (prev && prev.friendsCount) ?? 0,
+        pinned: true,
+        ts: (prev && prev.ts) || Date.now(),
+      };
+      if (idx >= 0) users[idx] = entry;
+      else users.unshift(entry);
+      changed = true;
+    }
+    if (!changed) return dife;
+    const next = { handle: ownerHandle, users, ts: Date.now() };
+    await chrome.storage.local.set({ [RF.KEY.diffExempt + ':' + ownerHandle]: next });
+    return next;
+  }
   function diffNameCell(u) {
     return u.screenName
       ? `<a href="https://x.com/${encodeURIComponent(u.screenName)}" target="_blank" rel="noopener">${esc(u.name)}</a>`
       : esc(u.name);
   }
   function diffRowCells(u) {
-    return `<td>@${esc(u.screenName)}</td><td>${diffNameCell(u)}</td><td>${esc(u.description)}</td>`
+    const bio = isPinnedExemptUser(u)
+      ? (u.description ? esc(u.description) + ' · ' : '') + '固定免取关'
+      : esc(u.description);
+    return `<td>@${esc(u.screenName)}</td><td>${diffNameCell(u)}</td><td>${bio}</td>`
       + `<td>${u.followersCount ?? 0}</td><td>${u.friendsCount ?? 0}</td><td>${fmtRatio(u)}</td>`;
   }
-  function sortedDiffUsers(users) {
-    if (!diffRatioSort) return users;
-    const dir = diffRatioSort === 'asc' ? 1 : -1;
-    return users.slice().sort((a, b) => {
-      const ra = followRatioPct(a);
-      const rb = followRatioPct(b);
-      if (ra == null && rb == null) return 0;
-      if (ra == null) return 1; // 无比值始终垫底
-      if (rb == null) return -1;
-      return (ra - rb) * dir;
-    });
+  function sortedDiffUsers(users, pinPinned) {
+    let list = users;
+    if (diffRatioSort) {
+      const dir = diffRatioSort === 'asc' ? 1 : -1;
+      list = users.slice().sort((a, b) => {
+        const ra = followRatioPct(a);
+        const rb = followRatioPct(b);
+        if (ra == null && rb == null) return 0;
+        if (ra == null) return 1; // 无比值始终垫底
+        if (rb == null) return -1;
+        return (ra - rb) * dir;
+      });
+    }
+    if (!pinPinned) return list;
+    const pinned = list.filter((u) => isPinnedExemptUser(u));
+    const rest = list.filter((u) => !isPinnedExemptUser(u));
+    return pinned.concat(rest);
   }
   function renderDiffView(h, diff, diffp, difu, dife) {
     const stateEl = $('diff-state');
@@ -690,21 +752,26 @@
       + `<td><button type="button" class="ghost" data-diff-exempt="${esc(u.userId)}"${actOff}>加入免取关</button></td>`
       + `</tr>`
     ).join('');
-    exemptBody.innerHTML = sortedDiffUsers(exemptUsers).slice(0, MAX_ROWS).map((u) =>
-      `<tr>${diffRowCells(u)}`
-      + `<td><button type="button" class="ghost" data-diff-unexempt="${esc(u.userId)}">移除</button></td>`
-      + `</tr>`
-    ).join('');
+    exemptBody.innerHTML = sortedDiffUsers(exemptUsers, true).slice(0, MAX_ROWS).map((u) => {
+      const pinned = isPinnedExemptUser(u);
+      const op = pinned
+        ? '<td><span class="hint">固定</span></td>'
+        : `<td><button type="button" class="ghost" data-diff-unexempt="${esc(u.userId)}">移除</button></td>`;
+      return `<tr>${diffRowCells(u)}${op}</tr>`;
+    }).join('');
     summaryEl.textContent = users.length
       ? `未回关 ${diff ? diff.notBackCount : users.length} 人`
-        + (diff && diff.total != null ? ` · 我关注 ${diff.total} 人` : '')
-        + (users.length > MAX_ROWS ? `(表格最多展示 ${MAX_ROWS} 行, 全量请导出 CSV)` : '')
+      + (diff && diff.total != null ? ` · 我关注 ${diff.total} 人` : '')
+      + (users.length > MAX_ROWS ? `(表格最多展示 ${MAX_ROWS} 行, 全量请导出 CSV)` : '')
       : '';
     if (exemptSummary) {
+      const always = alwaysExemptHandlesOpt().map((s) => '@' + s).join('、');
       exemptSummary.textContent = exemptUsers.length
-        ? `免取关 ${exemptUsers.length} 人(移除只离开本名单, 不会立刻回到未回关; 下次拉取若仍未回关会再出现)`
+        ? `免取关 ${exemptUsers.length} 人`
+          + (always ? `(含固定 ${always})` : '')
+          + '; 其余移除只离开本名单, 不会立刻回到未回关; 下次拉取若仍未回关会再出现'
           + (exemptUsers.length > MAX_ROWS ? ` · 表格最多展示 ${MAX_ROWS} 行` : '')
-        : '还没有免取关用户';
+        : (always ? `固定免取关 ${always} 会在识别账号后自动写入` : '还没有免取关用户');
     }
   }
 
@@ -750,6 +817,10 @@
     const users = ((exempt && exempt.users) || []).slice();
     const user = users.find((u) => String(u.userId) === uid);
     if (!user) { showOp('diff-op-result', '免取关名单里已没有此人'); scheduleRender(0); return; }
+    if (isPinnedExemptUser(user)) {
+      showOp('diff-op-result', '固定免取关账号不能移除');
+      return;
+    }
     await chrome.storage.local.set({
       [ekey]: { handle: h, users: users.filter((u) => String(u.userId) !== uid), ts: Date.now() },
     });
@@ -974,6 +1045,13 @@
     const r = clampGapInterval(minRaw, maxRaw, RF.DEFAULTS.unfollowIntervalMin, RF.DEFAULTS.unfollowIntervalMax, floor);
     return { unfollowIntervalMin: r.min, unfollowIntervalMax: r.max };
   }
+  function clampFetchFollowersMaxPages(raw) {
+    const lo = RF.FETCH_FOLLOWERS_PAGES_MIN || 2;
+    const hi = RF.FETCH_FOLLOWERS_PAGES_MAX || 1000;
+    const n = Math.round(+raw);
+    if (!Number.isFinite(n)) return RF.DEFAULTS.fetchFollowersMaxPages;
+    return Math.max(lo, Math.min(hi, n));
+  }
   async function saveSettings() {
     const { rf_settings: prev } = await chrome.storage.local.get('rf_settings');
     const humanCooldownMin = clampHumanCooldownMin($('s-humanCooldownMin').value);
@@ -984,6 +1062,8 @@
     const uf = clampUnfollowInterval($('s-unfollowIntervalMin').value, $('s-unfollowIntervalMax').value);
     $('s-unfollowIntervalMin').value = uf.unfollowIntervalMin;
     $('s-unfollowIntervalMax').value = uf.unfollowIntervalMax;
+    const fetchPages = clampFetchFollowersMaxPages($('s-fetchFollowersMaxPages').value);
+    $('s-fetchFollowersMaxPages').value = fetchPages;
     await chrome.storage.local.set({
       rf_settings: {
         ...(prev || {}),
@@ -991,6 +1071,7 @@
         intervalMax: fol.intervalMax,
         unfollowIntervalMin: uf.unfollowIntervalMin,
         unfollowIntervalMax: uf.unfollowIntervalMax,
+        fetchFollowersMaxPages: fetchPages,
         autoFetchMin: +$('s-autoFetchMin').value || RF.DEFAULTS.autoFetchMin,
         humanCooldownMin,
         tags: pendingTags,
@@ -1009,6 +1090,7 @@
     const uf = clampUnfollowInterval(v.unfollowIntervalMin, v.unfollowIntervalMax);
     $('s-unfollowIntervalMin').value = uf.unfollowIntervalMin;
     $('s-unfollowIntervalMax').value = uf.unfollowIntervalMax;
+    $('s-fetchFollowersMaxPages').value = clampFetchFollowersMaxPages(v.fetchFollowersMaxPages);
     $('s-autoFetchMin').value = v.autoFetchMin;
     $('s-humanCooldownMin').value = clampHumanCooldownMin(v.humanCooldownMin);
     pendingTags = (v.tags || []).map(normalizeTag).filter(Boolean);
@@ -1021,7 +1103,7 @@
   }
   $('btn-add-tag').onclick = addTagFromInput;
   $('s-tag-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') addTagFromInput(); });
-  ['s-intervalMin', 's-intervalMax', 's-unfollowIntervalMin', 's-unfollowIntervalMax', 's-autoFetchMin', 's-humanCooldownMin'].forEach((id) => {
+  ['s-intervalMin', 's-intervalMax', 's-unfollowIntervalMin', 's-unfollowIntervalMax', 's-fetchFollowersMaxPages', 's-autoFetchMin', 's-humanCooldownMin'].forEach((id) => {
     $(id).addEventListener('change', scheduleSave);
   });
 

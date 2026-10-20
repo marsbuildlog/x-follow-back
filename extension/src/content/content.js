@@ -393,12 +393,17 @@
 
       const settings = await getSettings();
       const count = 100;
-      const MAX_PAGES = 8; // 100/页 → 最多拉前 800 人; 更后面的粉丝回关收益低
+      const pagesLo = RFg.FETCH_FOLLOWERS_PAGES_MIN || 2;
+      const pagesHi = RFg.FETCH_FOLLOWERS_PAGES_MAX || 1000;
+      let MAX_PAGES = Math.round(+settings.fetchFollowersMaxPages);
+      if (!Number.isFinite(MAX_PAGES)) MAX_PAGES = RF.DEFAULTS.fetchFollowersMaxPages;
+      MAX_PAGES = Math.max(pagesLo, Math.min(pagesHi, MAX_PAGES));
       const all = [];
       let cursor = null;
       let page = 0;
       let retries = 0;
       let incomplete = false;
+      await log(`拉粉发车: 最多 ${MAX_PAGES} 页(空页/无游标提前停)`);
       while (page < MAX_PAGES) {
         // Route 1: background 直连(screen_name 剔除/缺省 cursor 删除用 null 删键语义表达)
         let res = await sendBg({ cmd: 'route1-graphql', op: OP_FOLLOWERS, vars: { count, screen_name: null, cursor: cursor || null } });

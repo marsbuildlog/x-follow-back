@@ -600,17 +600,25 @@
 
       const seen = new Set();
       const users = all.filter((u) => (seen.has(u.userId) ? false : (seen.add(u.userId), true)));
+      // 固定保护(@marsbuildlog 等): 进免取关; 未回关名单根本不写这些人
+      await ensureAlwaysExempt(handle, users);
       const exempt = await store.get(K.diffExempt + ':' + handle, null);
-      const exemptIds = new Set(((exempt && exempt.users) || []).map((x) => String(x.userId)));
+      const exemptIds = new Set(((exempt && exempt.users) || []).map((x) => String(x.userId)).filter(Boolean));
+      const skipNames = exemptScreenNameSet(exempt); // 含 DIFF_EXEMPT_ALWAYS
       const notBack = users
         .filter((u) => !u.followedBy)
-        .filter((u) => !exemptIds.has(String(u.userId)))
+        .filter((u) => {
+          const sn = String(u.screenName || '').toLowerCase();
+          return !exemptIds.has(String(u.userId)) && !skipNames.has(sn);
+        })
         .map((u) => ({
           userId: u.userId, screenName: u.screenName, name: u.name,
           description: u.description || '',
           followersCount: u.followersCount, friendsCount: u.friendsCount,
         }));
-      const exemptSkipped = users.filter((u) => !u.followedBy && exemptIds.has(String(u.userId))).length;
+      const exemptSkipped = users.filter((u) => !u.followedBy && (
+        exemptIds.has(String(u.userId)) || skipNames.has(String(u.screenName || '').toLowerCase())
+      )).length;
       await store.set(K.diff + ':' + handle, {
         handle, ts: Date.now(), total: users.length, notBackCount: notBack.length,
         incomplete: incomplete || undefined,
@@ -634,6 +642,63 @@
     }
   }
 
+  // ---------- 固定免取关账号(如 @marsbuildlog) ----------
+  // 按 screen_name 写入当前登录号的 fb_diff_exempt; 拉取 Following 时若撞上则补全 userId/资料。
+  function alwaysExemptHandles() {
+    return (RF.DIFF_EXEMPT_ALWAYS || []).map((s) => String(s || '').replace(/^@/, '').trim().toLowerCase()).filter(Boolean);
+  }
+  function exemptScreenNameSet(exempt) {
+    const names = new Set(alwaysExemptHandles());
+    for (const u of (exempt && exempt.users) || []) {
+      const sn = String(u.screenName || '').toLowerCase();
+      if (sn) names.add(sn);
+    }
+    return names;
+  }
+  async function ensureAlwaysExempt(ownerHandle, followingUsers) {
+    if (!ownerHandle) return null;
+    const wants = alwaysExemptHandles();
+    if (!wants.length) return null;
+    const byName = new Map();
+    for (const u of followingUsers || []) {
+      const sn = String(u.screenName || '').toLowerCase();
+      if (sn) byName.set(sn, u);
+    }
+    const ekey = K.diffExempt + ':' + ownerHandle;
+    const exempt = await store.get(ekey, null);
+    const users = ((exempt && exempt.users) || []).slice();
+    let changed = false;
+    for (const sn of wants) {
+      const fromFollow = byName.get(sn);
+      const idx = users.findIndex((u) => String(u.screenName || '').toLowerCase() === sn
+        || (fromFollow && String(u.userId) && String(u.userId) === String(fromFollow.userId)));
+      const prev = idx >= 0 ? users[idx] : null;
+      const entry = {
+        userId: (fromFollow && fromFollow.userId) || (prev && prev.userId) || '',
+        screenName: (fromFollow && fromFollow.screenName) || (prev && prev.screenName) || sn,
+        name: (fromFollow && fromFollow.name) || (prev && prev.name) || sn,
+        description: (fromFollow && fromFollow.description) || (prev && prev.description) || '',
+        followersCount: (fromFollow && fromFollow.followersCount) ?? (prev && prev.followersCount) ?? 0,
+        friendsCount: (fromFollow && fromFollow.friendsCount) ?? (prev && prev.friendsCount) ?? 0,
+        pinned: true,
+        ts: (prev && prev.ts) || Date.now(),
+      };
+      if (idx >= 0) {
+        const same = prev.pinned && String(prev.userId || '') === String(entry.userId || '')
+          && String(prev.screenName || '') === String(entry.screenName || '')
+          && String(prev.name || '') === String(entry.name || '');
+        if (!same) { users[idx] = entry; changed = true; }
+      } else {
+        users.unshift(entry);
+        changed = true;
+      }
+    }
+    if (!changed) return exempt;
+    const next = { handle: ownerHandle, users, ts: Date.now() };
+    await store.set(ekey, next);
+    return next;
+  }
+
   // ---------- 未回关名单批量取关(Route 1 destroy) ----------
   // 按设置的关注间隔节奏逐个 destroy; 成功则从 fb_diff:{handle} 移除; 可随时停止。
   async function runDiffUnfollow() {
@@ -648,11 +713,15 @@
         await log(msg);
         return { ok: false, message: msg };
       }
+      await ensureAlwaysExempt(handle, null);
       const key = K.diff + ':' + handle;
       const diff = await store.get(key, null);
       const exempt = await store.get(K.diffExempt + ':' + handle, null);
-      const exemptIds = new Set(((exempt && exempt.users) || []).map((x) => String(x.userId)));
-      const queue = ((diff && diff.users) || []).filter((u) => u && u.userId && !exemptIds.has(String(u.userId)));
+      const exemptIds = new Set(((exempt && exempt.users) || []).map((x) => String(x.userId)).filter(Boolean));
+      const exemptNames = exemptScreenNameSet(exempt);
+      const queue = ((diff && diff.users) || []).filter((u) => u && u.userId
+        && !exemptIds.has(String(u.userId))
+        && !exemptNames.has(String(u.screenName || '').toLowerCase()));
       if (!queue.length) {
         return { ok: false, message: '名单为空——先拉取未回关名单(免取关名单中的人不会被取关)' };
       }
@@ -675,6 +744,12 @@
           break;
         }
         const label = atName(u);
+        if (exemptNames.has(String(u.screenName || '').toLowerCase()) || exemptIds.has(String(u.userId))) {
+          skipN++;
+          done++;
+          await log(`批量取关: 跳过免取关 ${label}`);
+          continue;
+        }
         await store.set(K.diffUnfollowProgress, {
           handle, running: true, total, done, ok: okN, fail: failN, skip: skipN,
           current: u.screenName || u.userId, ts: Date.now(),
@@ -751,18 +826,27 @@
 
   // ---------- 拉粉(Route 1) ----------
   // 进度字段与 content.js / 控制台 UI 对齐: {running, page, maxPages, users}
+  function clampFetchFollowersMaxPages(raw) {
+    const lo = RF.FETCH_FOLLOWERS_PAGES_MIN || 2;
+    const hi = RF.FETCH_FOLLOWERS_PAGES_MAX || 1000;
+    const n = Math.round(+raw);
+    if (!Number.isFinite(n)) return RF.DEFAULTS.fetchFollowersMaxPages;
+    return Math.max(lo, Math.min(hi, n));
+  }
   async function runFetch(screenName) {
     if (fetchingFollowers) return { ok: false, message: '已在拉取中' };
     fetchingFollowers = true;
     try {
       let cursor = null;
       let page = 0;
-      const MAX_PAGES = 8; // 100/页 → 最多拉前 800 人
+      const settings = await getSettings();
+      const MAX_PAGES = clampFetchFollowersMaxPages(settings.fetchFollowersMaxPages);
       const count = 100;
       const all = [];
       await store.set(K.fetchProgress, {
         running: true, screenName, page: 0, maxPages: MAX_PAGES, users: 0, updatedAt: Date.now(),
       });
+      await log(`拉粉发车: 最多 ${MAX_PAGES} 页(空页/无游标提前停)`);
       while (page < MAX_PAGES) {
         const res = await sendBg({
           cmd: 'route1-graphql', op: OP_FOLLOWERS,
@@ -796,6 +880,7 @@
         page++;
         await sleep(1200 + Math.random() * 800);
       }
+      if (page >= MAX_PAGES) await log(`拉粉已达设置上限 ${MAX_PAGES} 页(可能还有更老的粉未拉)`);
       // 新粉在前 → 倒序后老粉先入队(等最久的先回关)
       const seen = new Set();
       const users = all
@@ -1236,9 +1321,14 @@
     clearInterval(tickTimer);
     tickTimer = setInterval(() => { autoTick().catch(() => {}); }, 30_000);
     autoTick().catch(() => {});
+    // 识别到账号后立刻把固定免取关(@marsbuildlog 等)写入名单
+    activeHandle().then((h) => { if (h) ensureAlwaysExempt(h, null).catch(() => {}); }).catch(() => {});
     // 浮层/其它页把任务标成 running 时尽快接手, 不必干等 30s tick
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
+      if (changes[K.active] && changes[K.active].newValue) {
+        ensureAlwaysExempt(changes[K.active].newValue, null).catch(() => {});
+      }
       const hit = Object.keys(changes).some((k) =>
         k.startsWith(K.task + ':') || k.startsWith(K.afTask + ':'));
       if (hit) autoTick().catch(() => {});
