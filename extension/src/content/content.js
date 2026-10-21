@@ -1080,7 +1080,7 @@
       return { ok: true, message: '已登记运行——循环醒来后自动接续(当前在限流等待)' };
     }
     // Phase 2: 关注走 Route 1, 无模板也可开跑; 模板仅作传输失败兑底
-    // (拉取不受影响, 打开页面后观察器会自动补拉)
+    // (拉取不受影响, 控制台宿主会按 autoFetchMin 定时补拉)
     try {
       const cap = await callPage('list-captured', {});
       if (!(cap.apiEndpoints || []).some((e) => e.path === FOLLOW_API)) {
@@ -1293,10 +1293,10 @@
     }
   }
 
-  // ---------- 自动恢复 / 自动拉取 / 互关帖扫描观察器 ----------
+  // ---------- 自动恢复 / 互关帖扫描观察器(回关定时补拉在控制台宿主) ----------
   async function autoTick() {
     // 任务归属永久锚定最近活跃账号: 接管/恢复在任意 x.com 页面都能继续;
-    // URL handle 只有匹配登录账号(pageHandle)才用于 setActive/自动拉取(ADR-0003)
+    // URL handle 只有匹配登录账号(pageHandle)才用于 setActive(ADR-0003)
     const handle = await pageHandle();
     let active = handle || (await store.get(K.active, null)) || '';
     if (handle) setActive(handle);
@@ -1348,18 +1348,13 @@
       // 不再要求页面可见: 扫描走 Route 1 直连, 后台标签页照样能发(定时器节流到 ~1次/分,
       // 恰好匹配一 tick 一帖的节奏); 只要标签页存在即可
       if (await acquireLock()) runAfScanOne(tag, h);
-      return; // 标签页不做回关自动拉取(那是 verified_followers 页的事)
+      return; // 标签页不做回关定时补拉(那是控制台宿主的事, ADR-0010)
     }
 
     if (fetchingFollowers) return;
 
-    // 自动拉取: 仅在已验证的本账号 followers 页触发(模板在该页捕获); 页面可见 + 距上次拉取超 autoFetchMin 分钟
+    // 回关定时补拉已迁控制台宿主(ADR-0010 / host-runtime autoTick)
     const t0 = await getTask(active);
-    if (document.visibilityState === 'visible' && handle &&
-        (!t0.lastFetchAt || Date.now() - t0.lastFetchAt >= settings.autoFetchMin * 60_000)) {
-      if (await acquireLock()) runFetch(active);
-      return;
-    }
 
     // 页面刷新后接管中断的任务(锚定 active, 任何页面都能接管)
     if (t0.state === 'running') {

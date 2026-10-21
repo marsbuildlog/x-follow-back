@@ -39,7 +39,7 @@ const RF = {
     dailyLimitRetryMin: 60, // 关注上限(161)后每隔多少分钟自动探测重试(X 按 24h 滚动窗口重置, 与本地 0 点无关)
     rateLimitBackoffMin: 15, // 命中 429/88 时的单次长退避(分钟)
     humanCooldownMin: 1,  // 人为冷却(分钟, 0–10): 关注循环 429/88 且有 reset 头时, 在重置时刻上再叠加 max(5s, 该值); 0=不加
-    autoFetchMin: 30,     // 自动拉取认证粉丝间隔(分钟, 手动拉取后重新计时)
+    autoFetchMin: 30,     // 控制台定时自动拉取认证粉丝间隔(分钟, 手动拉取后重新计时)
     tags: ['蓝V互关'],    // 互关标签默认内置; Options 可增删(空则回落此默认)
   },
   // 回关列表翻页上限硬范围(设置项 fetchFollowersMaxPages)

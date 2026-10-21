@@ -9,7 +9,7 @@
 - 面板展示缓存(refreshCache)与任务写入走同一条解析链, 不再单独猜。
 - **回关侧同理**: 任务账号从页面 URL 读(handle 形如 /:handle/verified_followers), 但 URL handle 必须等于 whoami 结果才采用——逛别人的关注/粉丝列表时不再误认(过去会把拉取到的粉丝写进别人的任务键); 非自己主页时展示退回最近活跃账号。
 - **whoami 数据源迭代(2026-10-10 晚)**: settings.json 实测会整体 429(code 88), verify_credentials 已下线(404)——接口兑底不可靠。改为**被动喍探页面自己的 Viewer 响应**(零额外请求, 与页面认定的登录账号同源), settings.json 降为兑底并加 5 分钟失败负缓存。
-- **身份不明时不采信 URL handle**: 宁可返回空串退回最近活跃账号, 也不再盲信 URL——盲信曾把行为静默退化为旧 bug。autoTick 的接管/恢复锚定最近活跃账号(任意页面可继续), 自动拉取仅在已验证的本账号页触发。
+- **身份不明时不采信 URL handle**: 宁可返回空串退回最近活跃账号, 也不再盲信 URL——盲信曾把行为静默退化为旧 bug。autoTick 的接管/恢复锚定最近活跃账号(任意页面可继续); 回关定时补拉改由控制台宿主按 autoFetchMin 触发(ADR-0010)。
 
 ## Consequences
 

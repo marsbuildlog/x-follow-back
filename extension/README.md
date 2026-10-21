@@ -49,7 +49,7 @@ npm test        # 仓库根目录运行, 跑核心逻辑单元测试(node ≥ 18
       启动时 await import() 显式加载 shared/constants.js 与 shared/logic.js 并校验挂载
       (⚠ 不用 manifest 多文件列表保证顺序: Chrome 的多文件注入顺序不可靠, 出过 logic.js 未执行的确定性 bug)
       拉取器(生产者): 翻页拉认证粉丝(100/页, 上限8页) → 纯追加合并进队列(不碰已有条目)
-        触发: 手动「更新列表」/ 打开页面且距上次拉取超过 autoFetchMin(默认30分钟)
+        触发: 手动「更新列表」/ 控制台按 autoFetchMin(默认30分钟)定时补拉
         传输: Route 1 直连优先, 结构性缺料才页面重放
         429 自行退避重试(同一页最多3次), 不影响回关循环
         已关注过滤: 只信列表自带 relationship_perspectives.following

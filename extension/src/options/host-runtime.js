@@ -837,6 +837,11 @@
     if (fetchingFollowers) return { ok: false, message: '已在拉取中' };
     fetchingFollowers = true;
     try {
+      // 计时起点: 手动/自动一视同仁, 成功失败都算(失败也等下一个周期再试, 避免连打)
+      const t0 = await getTask(screenName);
+      t0.lastFetchAt = Date.now();
+      await saveTask(screenName, t0);
+
       let cursor = null;
       let page = 0;
       const settings = await getSettings();
@@ -888,7 +893,6 @@
         .reverse();
       const t = await getTask(screenName);
       const added = mergeUsers(t, users);
-      t.lastFetchAt = Date.now();
       await saveTask(screenName, t);
       if (t.state === 'done' && t.queue.some((q) => q.status === 'pending')) {
         t.state = 'running';
@@ -1160,13 +1164,26 @@
     }
   }
 
-  // ---------- 自动 tick(补池 / 自动恢复) ----------
+  // ---------- 自动 tick(定时补拉 / 补池 / 自动恢复) ----------
   async function autoTick() {
     const handle = await activeHandle();
     if (!handle) return;
     if (fetchingFollowers || afSearching || afScanning || afBurstScanning) return;
     const settings = await getSettings();
     const af = await getAfTask(handle);
+    const fb = await getTask(handle);
+
+    // 定时自动补拉回关列表: 控制台宿主跑(ADR-0010), 与手动「更新列表」同路径;
+    // 距上次拉取超 autoFetchMin 即发车(成功失败都已在 runFetch 入口重计时)
+    const autoMin = +settings.autoFetchMin || RF.DEFAULTS.autoFetchMin;
+    if (!fb.lastFetchAt || Date.now() - fb.lastFetchAt >= autoMin * 60_000) {
+      if (await acquireLock()) {
+        await log(`定时自动补拉认证粉丝列表(间隔 ${autoMin} 分钟)`);
+        runFetch(handle).catch((e) => log(`自动补拉异常: ${e}`));
+        return;
+      }
+    }
+
     const autoTag = nextAutoSearchTag(settings.tags, af.lastAutoSearchTag);
     if (autoTag && shouldAutoSearch(af, Date.now(), {
       pendingTarget: AF.PENDING_TARGET, scanMax: AF.SCAN_MAX, poolMin: AF.POOL_MIN, cooldownMs: AF.AUTO_SEARCH_COOLDOWN_MS,
@@ -1176,7 +1193,6 @@
         runAfSearch(String(autoTag).replace(/^#/, '').trim(), handle).catch((e) => log(`自动补池异常: ${e}`));
       }
     }
-    const fb = await getTask(handle);
     const now = Date.now();
     for (const t of [fb, af]) {
       if (t.state === 'paused' && t.nextAutoResumeAt && now >= t.nextAutoResumeAt) {
